@@ -1000,17 +1000,131 @@ def show_workout_log():
     col1, col2 = st.columns([1, 5])
     with col1:
         if st.button("← 뒤로"):
-            st.session_state["page"] = "main"
+            st.session_state["page"]         = "main"
+            st.session_state["wl_entries"]   = []
+            st.session_state["wl_edit_idx"]  = -1
             st.rerun()
     with col2:
         st.markdown("<h3 style='margin:0; padding-top:4px;'>✅ 운동 기록</h3>",
                     unsafe_allow_html=True)
     st.markdown("<hr style='border-color:#CBD5E1; margin: 8px 0 16px;'>", unsafe_allow_html=True)
 
+    # 추가된 운동 목록 — session_state에 유지 (재실행 시 초기화 방지)
+    if "wl_entries" not in st.session_state:
+        st.session_state["wl_entries"] = []
+
+    # ── 추가된 운동 목록 (인라인 수정 가능) ──
+    if "wl_edit_idx" not in st.session_state:
+        st.session_state["wl_edit_idx"] = -1   # 현재 수정 중인 인덱스 (-1 = 없음)
+
+    if st.session_state["wl_entries"]:
+        total_load    = sum(e["load"]    for e in st.session_state["wl_entries"])
+        total_met_min = sum(e["met_min"] for e in st.session_state["wl_entries"])
+
+        with st.container(border=True):
+            st.markdown(
+                f"**📋 오늘 운동 목록** &nbsp;"
+                f"<span style='color:#2563EB;font-size:13px;font-weight:400;'>"
+                f"총 {total_load} RPE-min &nbsp;·&nbsp; ≈{total_met_min} MET-min</span>",
+                unsafe_allow_html=True)
+            st.write("")
+
+            for idx, e in enumerate(st.session_state["wl_entries"]):
+                type_emoji = "🏃" if e["type"] == "유산소" else "🏋️" if e["type"] == "근력" else "🧘"
+                is_editing = (st.session_state["wl_edit_idx"] == idx)
+
+                if is_editing:
+                    # ── 수정 모드 ──────────────────────────
+                    st.markdown(
+                        f"<div style='background:#EFF6FF;border:1.5px solid #2563EB;"
+                        f"border-radius:12px;padding:10px 14px;margin:4px 0;'>",
+                        unsafe_allow_html=True)
+                    st.markdown(f"**{type_emoji} {e['name']} 수정**")
+
+                    # 근력이면 세트/반복/무게도 수정
+                    if e["type"] == "근력":
+                        ec1, ec2 = st.columns(2)
+                        with ec1:
+                            new_dur = st.number_input("시간 (분)", 1, 300,
+                                                      value=e["duration"], step=5, key=f"ed_dur_{idx}")
+                            new_sets = st.number_input("세트 수", 1, 20,
+                                                       value=e.get("sets", 3), step=1, key=f"ed_sets_{idx}")
+                        with ec2:
+                            new_rpe = st.slider("RPE", 1, 10,
+                                                value=e["rpe"], key=f"ed_rpe_{idx}")
+                            new_reps = st.number_input("반복 수", 1, 50,
+                                                       value=e.get("reps", 10), step=1, key=f"ed_reps_{idx}")
+                        new_weight = st.number_input("무게 (kg)", 0, 500,
+                                                     value=e.get("weight", 0), step=5, key=f"ed_wt_{idx}")
+                    else:
+                        ec1, ec2 = st.columns(2)
+                        with ec1:
+                            new_dur = st.number_input("시간 (분)", 1, 300,
+                                                      value=e["duration"], step=5, key=f"ed_dur_{idx}")
+                        with ec2:
+                            new_rpe = st.slider("RPE", 1, 10,
+                                                value=e["rpe"], key=f"ed_rpe_{idx}")
+                        new_sets = new_reps = new_weight = None
+
+                    new_load    = new_dur * new_rpe
+                    new_met_min = int(rpe_to_met(new_rpe) * new_dur)
+                    st.markdown(
+                        f"<p style='color:#2563EB;font-size:12px;'>"
+                        f"→ {new_load} RPE-min &nbsp;·&nbsp; ≈{new_met_min} MET-min</p>",
+                        unsafe_allow_html=True)
+
+                    sc1, sc2 = st.columns(2)
+                    with sc1:
+                        if st.button("✅ 저장", key=f"save_{idx}", type="primary"):
+                            e["duration"] = new_dur
+                            e["rpe"]      = new_rpe
+                            e["load"]     = new_load
+                            e["met_min"]  = new_met_min
+                            if new_sets  is not None: e["sets"]   = new_sets
+                            if new_reps  is not None: e["reps"]   = new_reps
+                            if new_weight is not None: e["weight"] = new_weight
+                            st.session_state["wl_edit_idx"] = -1
+                            st.rerun()
+                    with sc2:
+                        if st.button("취소", key=f"cancel_{idx}"):
+                            st.session_state["wl_edit_idx"] = -1
+                            st.rerun()
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                else:
+                    # ── 표시 모드 ──────────────────────────
+                    extra = ""
+                    if e["type"] == "근력" and e.get("sets"):
+                        wt = f"{e['weight']}kg" if e.get("weight") else "맨몸"
+                        extra = f" &nbsp;·&nbsp; {e['sets']}×{e.get('reps','-')} {wt}"
+
+                    col_info, col_edit, col_del = st.columns([5, 1, 1])
+                    with col_info:
+                        st.markdown(
+                            f"<div style='background:#F8FAFF;border:1px solid #CBD5E1;"
+                            f"border-radius:10px;padding:8px 14px;'>"
+                            f"<span style='font-size:13px;color:#1e293b;'>"
+                            f"{type_emoji} <b>{e['name']}</b>{extra}</span><br>"
+                            f"<span style='font-size:12px;color:#64748b;'>"
+                            f"{e['duration']}분 &nbsp;·&nbsp; RPE {e['rpe']} &nbsp;·&nbsp; "
+                            f"<b style='color:#2563EB;'>{e['load']} RPE-min</b>"
+                            f" &nbsp;·&nbsp; ≈{e['met_min']} MET-min</span>"
+                            f"</div>", unsafe_allow_html=True)
+                    with col_edit:
+                        if st.button("✏️", key=f"edit_{idx}", help="수정"):
+                            st.session_state["wl_edit_idx"] = idx
+                            st.rerun()
+                    with col_del:
+                        if st.button("🗑️", key=f"del_{idx}", help="삭제"):
+                            st.session_state["wl_entries"].pop(idx)
+                            if st.session_state["wl_edit_idx"] == idx:
+                                st.session_state["wl_edit_idx"] = -1
+                            st.rerun()
+
+        st.write("")
+
     # ── 운동 유형 탭 ──
     t_cardio, t_strength, t_recovery = st.tabs(["🏃 유산소", "🏋️ 근력", "🧘 유연성·회복"])
-
-    entries = []   # 기록된 운동 목록 (여러 개 가능)
 
     # ════════ 유산소 ════════
     with t_cardio:
@@ -1059,12 +1173,13 @@ def show_workout_log():
             f"</p></div>", unsafe_allow_html=True)
 
         if st.button("➕ 유산소 추가", key="add_cardio"):
-            entries.append({
+            st.session_state["wl_entries"].append({
                 "type": "유산소", "name": ex_name,
                 "duration": c_duration, "rpe": c_rpe,
                 "load": c_load, "met_min": c_met_min, "met": ex_met,
             })
             st.toast(f"{ex_name} 추가됨!", icon="✅")
+            st.rerun()
 
     # ════════ 근력 ════════
     with t_strength:
@@ -1117,13 +1232,14 @@ def show_workout_log():
             f"</p></div>", unsafe_allow_html=True)
 
         if st.button("➕ 근력 추가", key="add_strength"):
-            entries.append({
+            st.session_state["wl_entries"].append({
                 "type": "근력", "name": s_name,
                 "duration": s_duration, "rpe": s_rpe,
                 "load": s_load, "met_min": s_met_min, "met": s_met,
                 "sets": s_sets, "reps": s_reps, "weight": s_weight,
             })
             st.toast(f"{s_name} 추가됨!", icon="✅")
+            st.rerun()
 
     # ════════ 유연성·회복 ════════
     with t_recovery:
@@ -1167,12 +1283,13 @@ def show_workout_log():
             f"</p></div>", unsafe_allow_html=True)
 
         if st.button("➕ 회복 추가", key="add_recovery"):
-            entries.append({
+            st.session_state["wl_entries"].append({
                 "type": "회복", "name": r_name,
                 "duration": r_duration, "rpe": r_rpe,
                 "load": r_load, "met_min": r_met_min, "met": r_met,
             })
             st.toast(f"{r_name} 추가됨!", icon="✅")
+            st.rerun()
 
     st.write("")
 
@@ -1201,13 +1318,14 @@ def show_workout_log():
             if st.button("💪 너무 쉬웠어",   key="fb_easy"): feedback = "easy"
 
         if feedback:
-            # 총 세션 부하 계산 (entries 합산 OR overall_rpe 기반)
-            if entries:
-                total_load    = sum(e["load"]    for e in entries)
-                total_met_min = sum(e["met_min"] for e in entries)
-                total_dur     = sum(e["duration"] for e in entries)
+            saved_entries = st.session_state["wl_entries"]
+            # 총 세션 부하 계산 (추가된 운동 합산 OR overall_rpe 직접 기반)
+            if saved_entries:
+                total_load    = sum(e["load"]    for e in saved_entries)
+                total_met_min = sum(e["met_min"] for e in saved_entries)
+                total_dur     = sum(e["duration"] for e in saved_entries)
             else:
-                # entries 없이 바로 피드백만 누른 경우 → overall_rpe로 추정
+                # 운동 추가 없이 피드백만 누른 경우 → overall_rpe + 30분으로 추정
                 total_dur     = 30
                 total_load    = total_dur * overall_rpe
                 total_met_min = int(rpe_to_met(overall_rpe) * total_dur)
@@ -1221,13 +1339,15 @@ def show_workout_log():
                 "met_min":  total_met_min,
                 "rpe":      overall_rpe,
                 "duration": total_dur,
-                "entries":  entries,
+                "entries":  saved_entries,
                 "notes":    notes,
                 "feedback": feedback,
             })
             st.session_state["streak"]     += 1
             st.session_state["sleep_score"] = None
             st.session_state["page"]        = "main"
+            st.session_state["wl_entries"]  = []
+            st.session_state["wl_edit_idx"] = -1
             save_user_data()
             msg = {"hard":"베이스라인을 살짝 낮췄어요 📉","ok":"딱 맞는 강도네요! 유지할게요 👍","easy":"베이스라인을 올렸어요 📈"}[feedback]
             st.toast(f"{msg} 🔥", icon="🔥")
