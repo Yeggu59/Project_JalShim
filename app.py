@@ -1009,15 +1009,158 @@ def show_workout_log():
                     unsafe_allow_html=True)
     st.markdown("<hr style='border-color:#CBD5E1; margin: 8px 0 16px;'>", unsafe_allow_html=True)
 
-    # 추가된 운동 목록 — session_state에 유지 (재실행 시 초기화 방지)
-    if "wl_entries" not in st.session_state:
-        st.session_state["wl_entries"] = []
+    # session_state 초기화
+    if "wl_entries"  not in st.session_state: st.session_state["wl_entries"]  = []
+    if "wl_edit_idx" not in st.session_state: st.session_state["wl_edit_idx"] = -1
 
-    # ── 추가된 운동 목록 (인라인 수정 가능) ──
-    if "wl_edit_idx" not in st.session_state:
-        st.session_state["wl_edit_idx"] = -1   # 현재 수정 중인 인덱스 (-1 = 없음)
+    # ══════════════════════════════════════
+    #  STEP 1 — 운동 추가 탭
+    # ══════════════════════════════════════
+    with st.container(border=True):
+        st.markdown("#### ➕ 운동 추가")
+        t_cardio, t_strength, t_recovery = st.tabs(["🏃 유산소", "🏋️ 근력", "🧘 유연성·회복"])
 
-    if st.session_state["wl_entries"]:
+        # ════════ 유산소 ════════
+        with t_cardio:
+            st.write("")
+            ex_names = [f"{e['emoji']} {e['name']}" for e in EXERCISE_DB["중강도"] + EXERCISE_DB["고강도"]]
+            selected = st.selectbox("운동 종목", ["직접 입력"] + ex_names, key="cardio_ex")
+            if selected == "직접 입력":
+                custom  = st.text_input("종목 이름", placeholder="예: 배드민턴, 줄넘기 ...", key="cardio_custom")
+                ex_name = custom if custom else "기타 유산소"
+                ex_met  = 5.0
+            else:
+                ex_name = selected
+                all_ex  = EXERCISE_DB["중강도"] + EXERCISE_DB["고강도"]
+                ex_met  = next((e["met"] for e in all_ex if f"{e['emoji']} {e['name']}" == selected), 5.0)
+
+            col1, col2 = st.columns(2)
+            with col1: c_duration = st.number_input("운동 시간 (분)", 1, 300, 30, 5, key="c_dur")
+            with col2: c_rpe      = st.slider("강도 (RPE)", 1, 10, 5, key="c_rpe")
+
+            with st.expander("📋 유산소 RPE 참고표"):
+                st.markdown("""
+| RPE | 호흡 상태 | 심박 느낌 | 대표 운동 |
+|:---:|-----------|-----------|-----------|
+| **1~2** | 편안히 대화 가능 | 거의 변화 없음 | 천천히 걷기 |
+| **3~4** | 대화 가능 | 약간 빨라짐 | 빠르게 걷기, 자전거 |
+| **5~6** | 짧은 문장만 가능 | 분명히 빨라짐 | 조깅, 수영 |
+| **7~8** | 말하기 힘듦 | 높고 강함 | 달리기, 등산 |
+| **9~10** | 말 불가 | 최대 | 전력질주, 줄넘기 |
+> 운동 직후가 아닌 **15~30분 후** 전체적인 느낌으로 평가하세요.
+                """)
+
+            c_load    = c_duration * c_rpe
+            c_met_min = int(ex_met * c_duration)
+            st.markdown(
+                f"<p style='color:#2563EB;font-size:13px;margin-top:6px;'>"
+                f"⏱ {c_duration}분 · RPE {c_rpe} → <b>{c_load} RPE-min &nbsp;/&nbsp; ≈{c_met_min} MET-min</b></p>",
+                unsafe_allow_html=True)
+            if st.button("➕ 목록에 추가", key="add_cardio", type="primary"):
+                st.session_state["wl_entries"].append({
+                    "type": "유산소", "name": ex_name,
+                    "duration": c_duration, "rpe": c_rpe,
+                    "load": c_load, "met_min": c_met_min, "met": ex_met,
+                })
+                st.toast(f"{ex_name} 추가됨!", icon="✅")
+                st.rerun()
+
+        # ════════ 근력 ════════
+        with t_strength:
+            st.write("")
+            strength_options = ["🏋️ 웨이트 (머신)", "🏋️ 웨이트 (프리웨이트)",
+                                 "💪 맨몸 운동 (푸시업·스쿼트 등)", "🤸 케틀벨", "직접 입력"]
+            s_selected = st.selectbox("운동 종목", strength_options, key="str_ex")
+            s_name = (st.text_input("종목 이름", placeholder="예: 데드리프트 ...", key="str_custom")
+                      if s_selected == "직접 입력" else s_selected)
+            s_name = s_name if s_name else "기타 근력"
+
+            col1, col2, col3 = st.columns(3)
+            with col1: s_sets   = st.number_input("세트 수", 1, 20, 3, 1, key="s_sets")
+            with col2: s_reps   = st.number_input("반복 수", 1, 50, 10, 1, key="s_reps")
+            with col3: s_weight = st.number_input("무게 (kg)", 0, 500, 0, 5, key="s_weight")
+            s_duration = st.number_input("총 시간 (분, 휴식 포함)", 1, 180, 45, 5, key="s_dur")
+            s_rpe      = st.slider("강도 (RPE)", 1, 10, 6, key="s_rpe")
+
+            with st.expander("📋 근력 RPE 참고표 (RIR 기반)"):
+                st.markdown("""
+**RIR(Reps In Reserve)**: 세트 종료 시 더 들 수 있었던 횟수
+| RPE | RIR | 활용 |
+|:---:|:---:|------|
+| **1~3** | 7회↑ 남음 | 워밍업 |
+| **4~5** | 4~6회 남음 | 가벼운 펌핑 |
+| **6~7** | 2~3회 남음 | 근비대 최적 구간 ✅ |
+| **8~9** | 1회 남음 | 고강도 트레이닝 |
+| **10** | 0 (실패) | 1RM 테스트 |
+                """)
+
+            s_met     = 5.0
+            s_load    = s_duration * s_rpe
+            s_met_min = int(s_met * s_duration)
+            wt_str    = f"{s_weight}kg" if s_weight > 0 else "맨몸"
+            st.markdown(
+                f"<p style='color:#2563EB;font-size:13px;margin-top:6px;'>"
+                f"{s_sets}×{s_reps} {wt_str} · ⏱ {s_duration}분 · RPE {s_rpe} → "
+                f"<b>{s_load} RPE-min &nbsp;/&nbsp; ≈{s_met_min} MET-min</b></p>",
+                unsafe_allow_html=True)
+            if st.button("➕ 목록에 추가", key="add_strength", type="primary"):
+                st.session_state["wl_entries"].append({
+                    "type": "근력", "name": s_name,
+                    "duration": s_duration, "rpe": s_rpe,
+                    "load": s_load, "met_min": s_met_min, "met": s_met,
+                    "sets": s_sets, "reps": s_reps, "weight": s_weight,
+                })
+                st.toast(f"{s_name} 추가됨!", icon="✅")
+                st.rerun()
+
+        # ════════ 유연성·회복 ════════
+        with t_recovery:
+            st.write("")
+            recovery_options = ["🧘 요가", "🤸 스트레칭", "🛁 냉온욕", "🚶 가벼운 산책", "직접 입력"]
+            r_selected = st.selectbox("종류", recovery_options, key="rec_ex")
+            r_name = (st.text_input("종류 이름", key="rec_custom")
+                      if r_selected == "직접 입력" else r_selected)
+            r_name = r_name if r_name else "기타 회복"
+
+            col1, col2 = st.columns(2)
+            with col1: r_duration = st.number_input("시간 (분)", 1, 120, 20, 5, key="r_dur")
+            with col2: r_rpe      = st.slider("강도 (RPE)", 1, 5, 2, key="r_rpe")
+
+            with st.expander("📋 회복 RPE 참고표"):
+                st.markdown("""
+| RPE | 느낌 | 예시 |
+|:---:|------|------|
+| **1** | 전혀 힘들지 않음 | 누워서 스트레칭 |
+| **2** | 가볍게 늘어나는 느낌 | 요가, 폼롤러 |
+| **3** | 약간의 자극 | 가벼운 산책 |
+| **4~5** | 조금 힘듦 | 빠른 걷기 |
+> 회복일은 **RPE 1~3** 유지가 목적이에요.
+                """)
+
+            r_met     = 2.5
+            r_load    = r_duration * r_rpe
+            r_met_min = int(r_met * r_duration)
+            st.markdown(
+                f"<p style='color:#2563EB;font-size:13px;margin-top:6px;'>"
+                f"⏱ {r_duration}분 · RPE {r_rpe} → <b>{r_load} RPE-min &nbsp;/&nbsp; ≈{r_met_min} MET-min</b></p>",
+                unsafe_allow_html=True)
+            if st.button("➕ 목록에 추가", key="add_recovery", type="primary"):
+                st.session_state["wl_entries"].append({
+                    "type": "회복", "name": r_name,
+                    "duration": r_duration, "rpe": r_rpe,
+                    "load": r_load, "met_min": r_met_min, "met": r_met,
+                })
+                st.toast(f"{r_name} 추가됨!", icon="✅")
+                st.rerun()
+
+    st.write("")
+
+    # ══════════════════════════════════════
+    #  STEP 2 — 운동 목록 (수치 크게)
+    # ══════════════════════════════════════
+    entries = st.session_state["wl_entries"]
+
+    if entries:
         total_load    = sum(e["load"]    for e in st.session_state["wl_entries"])
         total_met_min = sum(e["met_min"] for e in st.session_state["wl_entries"])
 
@@ -1123,190 +1266,128 @@ def show_workout_log():
 
         st.write("")
 
-    # ── 운동 유형 탭 ──
-    t_cardio, t_strength, t_recovery = st.tabs(["🏃 유산소", "🏋️ 근력", "🧘 유연성·회복"])
+    # ══════════════════════════════════════
+    #  STEP 2 — 운동 목록 + 합산 수치 (크게)
+    # ══════════════════════════════════════
+    entries = st.session_state["wl_entries"]
+    total_load    = sum(e["load"]    for e in entries) if entries else 0
+    total_met_min = sum(e["met_min"] for e in entries) if entries else 0
+    total_dur     = sum(e["duration"] for e in entries) if entries else 0
 
-    # ════════ 유산소 ════════
-    with t_cardio:
-        st.write("")
-        ex_names = [f"{e['emoji']} {e['name']}" for e in EXERCISE_DB["중강도"] + EXERCISE_DB["고강도"]]
-        selected = st.selectbox("운동 종목", ["직접 입력"] + ex_names, key="cardio_ex")
-        if selected == "직접 입력":
-            custom = st.text_input("종목 이름", placeholder="예: 배드민턴, 줄넘기 ...", key="cardio_custom")
-            ex_name = custom if custom else "기타 유산소"
-            ex_met  = 5.0
+    with st.container(border=True):
+        # 합산 수치 — 제일 중요한 정보, 크게
+        st.markdown("#### 📋 오늘 운동 목록")
+        if entries:
+            st.markdown(
+                f"<div style='background:linear-gradient(135deg,#EFF6FF,#DBEAFE);"
+                f"border-radius:14px;padding:16px 20px;margin-bottom:12px;'>"
+                f"<div style='display:flex;justify-content:space-around;align-items:center;'>"
+                f"<div style='text-align:center;'>"
+                f"<div style='font-size:2rem;font-weight:800;color:#2563EB;line-height:1;'>{total_load}</div>"
+                f"<div style='font-size:12px;color:#64748b;margin-top:2px;'>RPE-min</div>"
+                f"</div>"
+                f"<div style='font-size:1.4rem;color:#CBD5E1;'>|</div>"
+                f"<div style='text-align:center;'>"
+                f"<div style='font-size:2rem;font-weight:800;color:#2563EB;line-height:1;'>≈{total_met_min}</div>"
+                f"<div style='font-size:12px;color:#64748b;margin-top:2px;'>MET-min</div>"
+                f"</div>"
+                f"<div style='font-size:1.4rem;color:#CBD5E1;'>|</div>"
+                f"<div style='text-align:center;'>"
+                f"<div style='font-size:2rem;font-weight:800;color:#2563EB;line-height:1;'>{total_dur}</div>"
+                f"<div style='font-size:12px;color:#64748b;margin-top:2px;'>분</div>"
+                f"</div>"
+                f"</div></div>",
+                unsafe_allow_html=True)
+
+            for idx, e in enumerate(entries):
+                type_emoji = "🏃" if e["type"] == "유산소" else "🏋️" if e["type"] == "근력" else "🧘"
+                is_editing = (st.session_state["wl_edit_idx"] == idx)
+
+                if is_editing:
+                    st.markdown(
+                        f"<div style='background:#EFF6FF;border:1.5px solid #2563EB;"
+                        f"border-radius:12px;padding:12px 14px;margin:6px 0;'>",
+                        unsafe_allow_html=True)
+                    st.markdown(f"**{type_emoji} {e['name']} 수정**")
+                    if e["type"] == "근력":
+                        ec1, ec2 = st.columns(2)
+                        with ec1:
+                            new_dur  = st.number_input("시간(분)", 1, 300, e["duration"], 5, key=f"ed_dur_{idx}")
+                            new_sets = st.number_input("세트 수",  1, 20,  e.get("sets",3), 1, key=f"ed_sets_{idx}")
+                        with ec2:
+                            new_rpe  = st.slider("RPE", 1, 10, e["rpe"], key=f"ed_rpe_{idx}")
+                            new_reps = st.number_input("반복 수", 1, 50, e.get("reps",10), 1, key=f"ed_reps_{idx}")
+                        new_weight = st.number_input("무게(kg)", 0, 500, e.get("weight",0), 5, key=f"ed_wt_{idx}")
+                    else:
+                        ec1, ec2 = st.columns(2)
+                        with ec1: new_dur = st.number_input("시간(분)", 1, 300, e["duration"], 5, key=f"ed_dur_{idx}")
+                        with ec2: new_rpe = st.slider("RPE", 1, 10, e["rpe"], key=f"ed_rpe_{idx}")
+                        new_sets = new_reps = new_weight = None
+
+                    new_load    = new_dur * new_rpe
+                    new_met_min = int(rpe_to_met(new_rpe) * new_dur)
+                    st.markdown(
+                        f"<p style='color:#2563EB;font-size:13px;font-weight:600;'>"
+                        f"→ {new_load} RPE-min &nbsp;/&nbsp; ≈{new_met_min} MET-min</p>",
+                        unsafe_allow_html=True)
+                    sc1, sc2 = st.columns(2)
+                    with sc1:
+                        if st.button("✅ 저장", key=f"save_{idx}", type="primary"):
+                            e.update({"duration": new_dur, "rpe": new_rpe,
+                                      "load": new_load, "met_min": new_met_min})
+                            if new_sets   is not None: e["sets"]   = new_sets
+                            if new_reps   is not None: e["reps"]   = new_reps
+                            if new_weight is not None: e["weight"] = new_weight
+                            st.session_state["wl_edit_idx"] = -1
+                            st.rerun()
+                    with sc2:
+                        if st.button("취소", key=f"cancel_{idx}"):
+                            st.session_state["wl_edit_idx"] = -1
+                            st.rerun()
+                    st.markdown("</div>", unsafe_allow_html=True)
+                else:
+                    extra = ""
+                    if e["type"] == "근력" and e.get("sets"):
+                        wt = f"{e['weight']}kg" if e.get("weight") else "맨몸"
+                        extra = f" &nbsp;·&nbsp; {e['sets']}×{e.get('reps','-')} {wt}"
+                    col_info, col_edit, col_del = st.columns([5, 1, 1])
+                    with col_info:
+                        st.markdown(
+                            f"<div style='background:#F8FAFF;border:1px solid #CBD5E1;"
+                            f"border-radius:10px;padding:8px 14px;'>"
+                            f"<span style='font-size:13px;color:#1e293b;'>{type_emoji} <b>{e['name']}</b>{extra}</span><br>"
+                            f"<span style='font-size:12px;color:#64748b;'>{e['duration']}분 · RPE {e['rpe']}</span>"
+                            f"&nbsp;&nbsp;"
+                            f"<span style='font-size:13px;color:#2563EB;font-weight:700;'>"
+                            f"{e['load']} RPE-min &nbsp;/&nbsp; ≈{e['met_min']} MET-min</span>"
+                            f"</div>", unsafe_allow_html=True)
+                    with col_edit:
+                        if st.button("✏️", key=f"edit_{idx}", help="수정"):
+                            st.session_state["wl_edit_idx"] = idx; st.rerun()
+                    with col_del:
+                        if st.button("🗑️", key=f"del_{idx}", help="삭제"):
+                            entries.pop(idx)
+                            if st.session_state["wl_edit_idx"] == idx:
+                                st.session_state["wl_edit_idx"] = -1
+                            st.rerun()
         else:
-            ex_name = selected
-            all_ex  = EXERCISE_DB["중강도"] + EXERCISE_DB["고강도"]
-            ex_met  = next((e["met"] for e in all_ex if f"{e['emoji']} {e['name']}" == selected), 5.0)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            c_duration = st.number_input("운동 시간 (분)", 1, 300, 30, 5, key="c_dur")
-        with col2:
-            c_rpe = st.slider("전체 강도 (RPE)", 1, 10, 5, key="c_rpe",
-                              help="운동 끝나고 15~30분 후 평가 · 1=매우 쉬움 ~ 10=최대 강도")
-
-        with st.expander("📋 유산소 RPE 참고표"):
-            st.markdown("""
-| RPE | 호흡 상태 | 심박 느낌 | 대표 운동 |
-|:---:|-----------|-----------|-----------|
-| **1~2** | 편안히 대화 가능 | 거의 변화 없음 | 천천히 걷기 |
-| **3~4** | 대화 가능 | 약간 빨라짐 | 빠르게 걷기, 자전거 |
-| **5~6** | 짧은 문장만 가능 | 분명히 빨라짐 | 조깅, 수영 |
-| **7~8** | 말하기 힘듦 | 높고 강함 | 달리기, 등산 |
-| **9~10** | 말 불가 | 최대 | 전력질주, 줄넘기 |
-> 운동 직후가 아닌 **15~30분 후** 전체적인 느낌으로 평가하세요.
-            """)
-
-        c_met_approx = rpe_to_met(c_rpe)
-        c_met_min    = int(ex_met * c_duration)
-        c_load       = c_duration * c_rpe
-
-        st.markdown(
-            f"<div style='background:#EFF6FF;border-radius:10px;padding:10px 14px;margin-top:8px;'>"
-            f"<span style='color:#2563EB;font-weight:700;'>{ex_name}</span>"
-            f"<p style='color:#475569;font-size:13px;margin:4px 0 0;'>"
-            f"⏱ {c_duration}분 &nbsp;·&nbsp; RPE {c_rpe} &nbsp;·&nbsp; "
-            f"세션 부하 <b>{c_load} RPE-min</b> &nbsp;·&nbsp; "
-            f"≈ <b>{c_met_min} MET-min</b> (MET {ex_met} 기준)"
-            f"</p></div>", unsafe_allow_html=True)
-
-        if st.button("➕ 유산소 추가", key="add_cardio"):
-            st.session_state["wl_entries"].append({
-                "type": "유산소", "name": ex_name,
-                "duration": c_duration, "rpe": c_rpe,
-                "load": c_load, "met_min": c_met_min, "met": ex_met,
-            })
-            st.toast(f"{ex_name} 추가됨!", icon="✅")
-            st.rerun()
-
-    # ════════ 근력 ════════
-    with t_strength:
-        st.write("")
-        strength_options = [
-            "🏋️ 웨이트 (머신)", "🏋️ 웨이트 (프리웨이트)", "💪 맨몸 운동 (푸시업·스쿼트 등)",
-            "🤸 케틀벨", "직접 입력"
-        ]
-        s_selected = st.selectbox("운동 종목", strength_options, key="str_ex")
-        if s_selected == "직접 입력":
-            s_name = st.text_input("종목 이름", placeholder="예: 데드리프트, 벤치프레스 ...", key="str_custom")
-            s_name = s_name if s_name else "기타 근력"
-        else:
-            s_name = s_selected
-
-        col1, col2, col3 = st.columns(3)
-        with col1: s_sets = st.number_input("세트 수", 1, 20, 3, 1, key="s_sets")
-        with col2: s_reps = st.number_input("세트당 반복 수", 1, 50, 10, 1, key="s_reps")
-        with col3: s_weight = st.number_input("무게 (kg, 맨몸=0)", 0, 500, 0, 5, key="s_weight")
-
-        s_duration = st.number_input("총 운동 시간 (분, 휴식 포함)", 1, 180, 45, 5, key="s_dur")
-        s_rpe = st.slider("전체 강도 (RPE)", 1, 10, 6, key="s_rpe",
-                          help="모든 세트 끝난 후 15~30분 뒤 전체 강도를 평가해주세요.")
-
-        with st.expander("📋 근력 RPE 참고표 (RIR 기반)"):
-            st.markdown("""
-**RIR(Reps In Reserve)**: 세트 종료 시점에 더 들 수 있었던 횟수
-
-| RPE | RIR | 느낌 | 활용 |
-|:---:|:---:|------|------|
-| **1~3** | 7회↑ 남음 | 매우 가벼움 | 워밍업 |
-| **4~5** | 4~6회 남음 | 가볍게 자극됨 | 가벼운 펌핑 |
-| **6~7** | 2~3회 남음 | 힘들지만 여유 있음 | 근비대 최적 구간 |
-| **8~9** | 1회 남음 | 거의 한계 | 고강도 트레이닝 |
-| **10** | 0 (실패) | 한계 돌파 | 1RM 테스트 |
-> 근비대 목적이면 RPE **6~8** 구간을 목표로 하세요.
-            """)
-
-        s_met     = 5.0   # 웨이트 트레이닝 기준 MET (ACSM 2024)
-        s_met_min = int(s_met * s_duration)
-        s_load    = s_duration * s_rpe
-        weight_str = f"{s_weight}kg" if s_weight > 0 else "맨몸"
-
-        st.markdown(
-            f"<div style='background:#EFF6FF;border-radius:10px;padding:10px 14px;margin-top:8px;'>"
-            f"<span style='color:#2563EB;font-weight:700;'>{s_name}</span>"
-            f"<p style='color:#475569;font-size:13px;margin:4px 0 0;'>"
-            f"{s_sets}세트 × {s_reps}회 · {weight_str} &nbsp;·&nbsp; ⏱ {s_duration}분 &nbsp;·&nbsp; RPE {s_rpe}"
-            f"<br>세션 부하 <b>{s_load} RPE-min</b> &nbsp;·&nbsp; ≈ <b>{s_met_min} MET-min</b>"
-            f"</p></div>", unsafe_allow_html=True)
-
-        if st.button("➕ 근력 추가", key="add_strength"):
-            st.session_state["wl_entries"].append({
-                "type": "근력", "name": s_name,
-                "duration": s_duration, "rpe": s_rpe,
-                "load": s_load, "met_min": s_met_min, "met": s_met,
-                "sets": s_sets, "reps": s_reps, "weight": s_weight,
-            })
-            st.toast(f"{s_name} 추가됨!", icon="✅")
-            st.rerun()
-
-    # ════════ 유연성·회복 ════════
-    with t_recovery:
-        st.write("")
-        recovery_options = [
-            "🧘 요가", "🤸 스트레칭", "🛁 냉온욕", "🚶 가벼운 산책", "직접 입력"
-        ]
-        r_selected = st.selectbox("종류", recovery_options, key="rec_ex")
-        if r_selected == "직접 입력":
-            r_name = st.text_input("종류 이름", key="rec_custom")
-            r_name = r_name if r_name else "기타 회복"
-        else:
-            r_name = r_selected
-
-        r_duration = st.number_input("시간 (분)", 1, 120, 20, 5, key="r_dur")
-        r_rpe      = st.slider("전체 강도 (RPE)", 1, 5, 2, key="r_rpe",
-                               help="회복 운동은 보통 1~3 사이로 낮아요.")
-
-        with st.expander("📋 회복 RPE 참고표"):
-            st.markdown("""
-| RPE | 느낌 | 예시 |
-|:---:|------|------|
-| **1** | 전혀 힘들지 않음 | 누워서 스트레칭 |
-| **2** | 가볍게 늘어나는 느낌 | 요가, 폼롤러 |
-| **3** | 약간의 자극 | 가벼운 산책 |
-| **4** | 조금 힘듦 | 빠른 걷기 |
-| **5** | 확실히 힘듦 | 가벼운 조깅 |
-> 회복일은 **RPE 1~3**을 유지하는 것이 목적이에요.
-            """)
-
-        r_met      = 2.5
-        r_met_min  = int(r_met * r_duration)
-        r_load     = r_duration * r_rpe
-
-        st.markdown(
-            f"<div style='background:#EFF6FF;border-radius:10px;padding:10px 14px;margin-top:8px;'>"
-            f"<span style='color:#2563EB;font-weight:700;'>{r_name}</span>"
-            f"<p style='color:#475569;font-size:13px;margin:4px 0 0;'>"
-            f"⏱ {r_duration}분 &nbsp;·&nbsp; RPE {r_rpe} &nbsp;·&nbsp; "
-            f"≈ <b>{r_met_min} MET-min</b>"
-            f"</p></div>", unsafe_allow_html=True)
-
-        if st.button("➕ 회복 추가", key="add_recovery"):
-            st.session_state["wl_entries"].append({
-                "type": "회복", "name": r_name,
-                "duration": r_duration, "rpe": r_rpe,
-                "load": r_load, "met_min": r_met_min, "met": r_met,
-            })
-            st.toast(f"{r_name} 추가됨!", icon="✅")
-            st.rerun()
+            st.markdown("<p style='color:#94a3b8;text-align:center;padding:16px 0;'>"
+                        "위 탭에서 운동을 추가해주세요.</p>", unsafe_allow_html=True)
 
     st.write("")
 
-    # ── 세션 메모 + 전체 피드백 ──
+    # ══════════════════════════════════════
+    #  STEP 3 — 제출
+    # ══════════════════════════════════════
     with st.container(border=True):
         st.markdown("#### 📝 오늘 운동 총평")
-        notes = st.text_area("메모 (선택)", placeholder="컨디션, 특이사항, 부위 피로감 등을 자유롭게 적어보세요.",
-                             height=80, key="workout_notes")
+        notes = st.text_area("메모 (선택)", placeholder="컨디션, 특이사항, 피로 부위 등을 자유롭게 적어보세요.",
+                             height=70, key="workout_notes")
         st.write("")
-
-        # 대표 RPE — 입력된 운동들의 최대 RPE 또는 직접 입력
-        overall_rpe = st.slider(
-            "오늘 전체 운동 강도 (RPE)", 1, 10, 5, key="overall_rpe",
-            help="모든 운동을 합쳐서 오늘 하루 전체 강도를 평가해주세요. (15~30분 후 권장)")
-
+        overall_rpe = st.slider("오늘 전체 강도 (RPE)", 1, 10, 5, key="overall_rpe",
+                                help="모든 운동 합쳐서 오늘 하루 전체 느낌으로 평가 · 15~30분 후 권장")
         st.write("")
-        st.markdown("<p style='color:#64748b;font-size:13px;font-weight:600;'>오늘 운동 어떠셨나요?</p>",
+        st.markdown("<p style='color:#475569;font-size:13px;font-weight:600;'>오늘 운동 어떠셨나요?</p>",
                     unsafe_allow_html=True)
         col1, col2, col3 = st.columns(3)
         feedback = None
@@ -1319,35 +1400,28 @@ def show_workout_log():
 
         if feedback:
             saved_entries = st.session_state["wl_entries"]
-            # 총 세션 부하 계산 (추가된 운동 합산 OR overall_rpe 직접 기반)
             if saved_entries:
-                total_load    = sum(e["load"]    for e in saved_entries)
-                total_met_min = sum(e["met_min"] for e in saved_entries)
-                total_dur     = sum(e["duration"] for e in saved_entries)
+                f_load    = sum(e["load"]    for e in saved_entries)
+                f_met_min = sum(e["met_min"] for e in saved_entries)
+                f_dur     = sum(e["duration"] for e in saved_entries)
             else:
-                # 운동 추가 없이 피드백만 누른 경우 → overall_rpe + 30분으로 추정
-                total_dur     = 30
-                total_load    = total_dur * overall_rpe
-                total_met_min = int(rpe_to_met(overall_rpe) * total_dur)
+                f_dur     = 30
+                f_load    = f_dur * overall_rpe
+                f_met_min = int(rpe_to_met(overall_rpe) * f_dur)
 
             adj = {"hard": 0.95, "ok": 1.0, "easy": 1.05}[feedback]
             st.session_state["baseline_met"] = int(baseline * adj)
             st.session_state["session_logs"].append({
-                "day":      day,
-                "date":     date.today().isoformat(),
-                "load":     total_load,
-                "met_min":  total_met_min,
-                "rpe":      overall_rpe,
-                "duration": total_dur,
-                "entries":  saved_entries,
-                "notes":    notes,
-                "feedback": feedback,
+                "day": day, "date": date.today().isoformat(),
+                "load": f_load, "met_min": f_met_min,
+                "rpe": overall_rpe, "duration": f_dur,
+                "entries": saved_entries, "notes": notes, "feedback": feedback,
             })
-            st.session_state["streak"]     += 1
-            st.session_state["sleep_score"] = None
-            st.session_state["page"]        = "main"
-            st.session_state["wl_entries"]  = []
-            st.session_state["wl_edit_idx"] = -1
+            st.session_state["streak"]      += 1
+            st.session_state["sleep_score"]  = None
+            st.session_state["page"]         = "main"
+            st.session_state["wl_entries"]   = []
+            st.session_state["wl_edit_idx"]  = -1
             save_user_data()
             msg = {"hard":"베이스라인을 살짝 낮췄어요 📉","ok":"딱 맞는 강도네요! 유지할게요 👍","easy":"베이스라인을 올렸어요 📈"}[feedback]
             st.toast(f"{msg} 🔥", icon="🔥")
