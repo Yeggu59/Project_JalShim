@@ -5,6 +5,8 @@ import pandas as pd
 import os
 import glob
 import json
+import calendar
+from datetime import date, timedelta
 
 # ──────────────────────────────────────────
 #  기본 설정
@@ -251,6 +253,18 @@ def calc_sleep_modifier(score):
     return 0.8
 
 
+def save_sleep_score(score: int):
+    """수면 점수를 sleep_logs에 오늘 날짜로 저장 (중복 시 덮어쓰기)."""
+    today = date.today().isoformat()
+    logs  = st.session_state["sleep_logs"]
+    # 오늘 날짜 항목이 이미 있으면 업데이트
+    for entry in logs:
+        if entry["date"] == today:
+            entry["score"] = score
+            return
+    logs.append({"date": today, "score": score})
+
+
 def rpe_to_met(rpe: int) -> float:
     """
     CR10 RPE → MET 근사 변환
@@ -265,7 +279,8 @@ def rpe_to_met(rpe: int) -> float:
 # ──────────────────────────────────────────
 USER_DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data.json")
 
-PERSIST_KEYS = ["step", "use_watch", "baseline_met", "streak", "user_history", "session_logs"]
+PERSIST_KEYS = ["step", "use_watch", "baseline_met", "streak",
+                "user_history", "session_logs", "sleep_logs", "start_date"]
 
 _DEFAULTS = {
     "step":         0,
@@ -275,7 +290,10 @@ _DEFAULTS = {
     "sleep_score":  None,
     "user_history": {"rem": [], "deep": [], "hr": []},
     "session_logs": [],
-    "page":         "main",   # "main" | "workout_log"
+    "sleep_logs":   [],   # [{"date": "2024-01-01", "score": 85}, ...]
+    "start_date":   date.today().isoformat(),
+    "cal_month":    date.today().strftime("%Y-%m"),   # 달력 현재 표시 월
+    "page":         "main",
 }
 
 def load_user_data() -> dict:
@@ -457,7 +475,9 @@ def _show_sleep_input():
                                            wd["DEEP_PERCENT"],  wd["HR_BELOW_RESTING"]]],
                                          columns=["HOURS_DECIMAL","REM_PERCENT","DEEP_PERCENT","HR_BELOW_RESTING"])
                         score = int(ml_model.predict(X)[0])
-                        st.session_state["sleep_score"] = min(max(score, 0), 100)
+                        final = min(max(score, 0), 100)
+                        st.session_state["sleep_score"] = final
+                        save_sleep_score(final)
                         # 워치 데이터도 user_history에 저장 (결측치 보완 품질 향상)
                         st.session_state["user_history"]["rem"].append(wd["REM_PERCENT"])
                         st.session_state["user_history"]["deep"].append(wd["DEEP_PERCENT"])
@@ -497,7 +517,9 @@ def _show_sleep_input():
                                          imp["DEEP_PERCENT"], imp["HR_BELOW_RESTING"]]],
                                        columns=["HOURS_DECIMAL","REM_PERCENT","DEEP_PERCENT","HR_BELOW_RESTING"])
                     score = int(ml_model.predict(X)[0] * (subjective_feel / 3.0))
-                    st.session_state["sleep_score"] = min(max(score, 0), 100)
+                    final = min(max(score, 0), 100)
+                    st.session_state["sleep_score"] = final
+                    save_sleep_score(final)
                     st.rerun()
         else:
             _info_box("상세 입력이란?",
@@ -524,7 +546,9 @@ def _show_sleep_input():
                     st.session_state["user_history"]["rem"].append(rem_percent)
                     st.session_state["user_history"]["deep"].append(deep_percent)
                     st.session_state["user_history"]["hr"].append(hr_below)
-                    st.session_state["sleep_score"] = min(max(score, 0), 100)
+                    final = min(max(score, 0), 100)
+                    st.session_state["sleep_score"] = final
+                    save_sleep_score(final)
                     st.rerun()
 
 
@@ -711,10 +735,142 @@ Dr. Carl Foster(2001)가 고안한 검증된 방법으로, 심박수 측정 없�
 
 
 # ──────────────────────────────────────────
+#  달력 렌더링
+# ──────────────────────────────────────────
+def _render_calendar():
+    """운동/수면 기록을 HTML 달력으로 렌더링."""
+    logs       = st.session_state["session_logs"]
+    sleep_logs = st.session_state["sleep_logs"]
+
+    # 날짜별 인덱스 구성
+    workout_by_date = {}   # date_str -> log entry
+    for l in logs:
+        if "date" in l:
+            workout_by_date[l["date"]] = l
+
+    sleep_by_date = {s["date"]: s["score"] for s in sleep_logs}
+
+    # 월 탐색
+    cal_month = st.session_state.get("cal_month", date.today().strftime("%Y-%m"))
+    y, m = int(cal_month[:4]), int(cal_month[5:7])
+
+    col1, col2, col3 = st.columns([1, 3, 1])
+    with col1:
+        if st.button("◀", key="cal_prev"):
+            prev = date(y, m, 1) - timedelta(days=1)
+            st.session_state["cal_month"] = prev.strftime("%Y-%m")
+            st.rerun()
+    with col2:
+        st.markdown(f"<p style='text-align:center;font-weight:700;color:#1e293b;font-size:15px;'>"
+                    f"{y}년 {m}월</p>", unsafe_allow_html=True)
+    with col3:
+        if st.button("▶", key="cal_next"):
+            next_m = date(y, m, 28) + timedelta(days=4)
+            st.session_state["cal_month"] = next_m.strftime("%Y-%m")
+            st.rerun()
+
+    # 달력 HTML 생성
+    _, days_in_month = calendar.monthrange(y, m)
+    first_weekday    = calendar.monthrange(y, m)[0]   # 0=월요일
+    today_str        = date.today().isoformat()
+
+    DAYS_KR = ["월", "화", "수", "목", "금", "토", "일"]
+    header  = "".join(f"<th style='padding:6px;color:#94a3b8;font-size:12px;font-weight:600;'>{d}</th>"
+                      for d in DAYS_KR)
+
+    cells = ["<td></td>"] * first_weekday
+    for d in range(1, days_in_month + 1):
+        ds = f"{y}-{m:02d}-{d:02d}"
+        workout = workout_by_date.get(ds)
+        sleep_s = sleep_by_date.get(ds)
+
+        # 셀 상태 판정
+        high_load   = workout and workout.get("met_min", 0) >= 300
+        great_sleep = sleep_s and sleep_s >= 80
+        any_workout = bool(workout)
+
+        # 이펙트 결정
+        if high_load and great_sleep:
+            # 🔥 완벽한 날 — 그라디언트 + 빛나는 효과
+            bg     = "linear-gradient(135deg, #DBEAFE, #D1FAE5)"
+            border = "2px solid #2563EB"
+            shadow = "0 0 10px rgba(37,99,235,0.35)"
+            badge  = "🔥"
+        elif high_load:
+            # 💪 열심히 운동한 날
+            bg     = "#DBEAFE"
+            border = "1.5px solid #2563EB"
+            shadow = "0 0 6px rgba(37,99,235,0.2)"
+            badge  = "💪"
+        elif any_workout:
+            # 🏃 운동한 날
+            bg     = "#EFF6FF"
+            border = "1px solid #93c5fd"
+            shadow = "none"
+            badge  = "🏃"
+        elif great_sleep:
+            # 🌙 잘 쉰 날
+            bg     = "#ECFDF5"
+            border = "1px solid #6ee7b7"
+            shadow = "0 0 6px rgba(16,185,129,0.2)"
+            badge  = "🌙"
+        else:
+            bg     = "#FFFFFF"
+            border = "1px solid #E2E8F0"
+            shadow = "none"
+            badge  = ""
+
+        today_ring = "outline: 2px solid #2563EB; outline-offset:2px;" if ds == today_str else ""
+        sleep_dot  = ""
+        if sleep_s:
+            dot_color = "#10b981" if sleep_s >= 80 else "#f59e0b" if sleep_s >= 50 else "#ef4444"
+            sleep_dot = f"<div style='width:5px;height:5px;border-radius:50%;background:{dot_color};margin:0 auto;'></div>"
+
+        cells.append(
+            f"<td style='padding:3px;'>"
+            f"<div style='background:{bg};border:{border};border-radius:10px;"
+            f"box-shadow:{shadow};{today_ring}"
+            f"min-width:36px;min-height:46px;text-align:center;padding:4px 2px;'>"
+            f"<div style='font-size:12px;color:#64748b;'>{d}</div>"
+            f"<div style='font-size:14px;line-height:1.2;'>{badge}</div>"
+            f"{sleep_dot}"
+            f"</div></td>"
+        )
+
+    # 7칸씩 행 분할
+    while len(cells) % 7 != 0:
+        cells.append("<td></td>")
+    rows = ""
+    for i in range(0, len(cells), 7):
+        rows += "<tr>" + "".join(cells[i:i+7]) + "</tr>"
+
+    html = f"""
+    <table style='width:100%;border-collapse:separate;border-spacing:3px;'>
+      <thead><tr>{header}</tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    <div style='margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;'>
+      <span style='font-size:12px;color:#64748b;'>🔥 운동+수면 완벽</span>
+      <span style='font-size:12px;color:#64748b;'>💪 고강도 운동</span>
+      <span style='font-size:12px;color:#64748b;'>🏃 운동 완료</span>
+      <span style='font-size:12px;color:#64748b;'>🌙 수면 양호</span>
+      <span style='font-size:12px;color:#64748b;'>● 수면점수 (초록/노랑/빨강)</span>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────
 #  기록 탭
 # ──────────────────────────────────────────
 def _show_history():
     st.markdown("#### 📈 활동 기록")
+    st.write("")
+
+    # ── 달력 ──
+    with st.container(border=True):
+        _render_calendar()
+
     st.write("")
 
     # 연속 달성 + 평균 REM
@@ -877,6 +1033,18 @@ def show_workout_log():
             c_rpe = st.slider("전체 강도 (RPE)", 1, 10, 5, key="c_rpe",
                               help="운동 끝나고 15~30분 후 평가 · 1=매우 쉬움 ~ 10=최대 강도")
 
+        with st.expander("📋 유산소 RPE 참고표"):
+            st.markdown("""
+| RPE | 호흡 상태 | 심박 느낌 | 대표 운동 |
+|:---:|-----------|-----------|-----------|
+| **1~2** | 편안히 대화 가능 | 거의 변화 없음 | 천천히 걷기 |
+| **3~4** | 대화 가능 | 약간 빨라짐 | 빠르게 걷기, 자전거 |
+| **5~6** | 짧은 문장만 가능 | 분명히 빨라짐 | 조깅, 수영 |
+| **7~8** | 말하기 힘듦 | 높고 강함 | 달리기, 등산 |
+| **9~10** | 말 불가 | 최대 | 전력질주, 줄넘기 |
+> 운동 직후가 아닌 **15~30분 후** 전체적인 느낌으로 평가하세요.
+            """)
+
         c_met_approx = rpe_to_met(c_rpe)
         c_met_min    = int(ex_met * c_duration)
         c_load       = c_duration * c_rpe
@@ -921,6 +1089,20 @@ def show_workout_log():
         s_rpe = st.slider("전체 강도 (RPE)", 1, 10, 6, key="s_rpe",
                           help="모든 세트 끝난 후 15~30분 뒤 전체 강도를 평가해주세요.")
 
+        with st.expander("📋 근력 RPE 참고표 (RIR 기반)"):
+            st.markdown("""
+**RIR(Reps In Reserve)**: 세트 종료 시점에 더 들 수 있었던 횟수
+
+| RPE | RIR | 느낌 | 활용 |
+|:---:|:---:|------|------|
+| **1~3** | 7회↑ 남음 | 매우 가벼움 | 워밍업 |
+| **4~5** | 4~6회 남음 | 가볍게 자극됨 | 가벼운 펌핑 |
+| **6~7** | 2~3회 남음 | 힘들지만 여유 있음 | 근비대 최적 구간 |
+| **8~9** | 1회 남음 | 거의 한계 | 고강도 트레이닝 |
+| **10** | 0 (실패) | 한계 돌파 | 1RM 테스트 |
+> 근비대 목적이면 RPE **6~8** 구간을 목표로 하세요.
+            """)
+
         s_met     = 5.0   # 웨이트 트레이닝 기준 MET (ACSM 2024)
         s_met_min = int(s_met * s_duration)
         s_load    = s_duration * s_rpe
@@ -959,6 +1141,19 @@ def show_workout_log():
         r_duration = st.number_input("시간 (분)", 1, 120, 20, 5, key="r_dur")
         r_rpe      = st.slider("전체 강도 (RPE)", 1, 5, 2, key="r_rpe",
                                help="회복 운동은 보통 1~3 사이로 낮아요.")
+
+        with st.expander("📋 회복 RPE 참고표"):
+            st.markdown("""
+| RPE | 느낌 | 예시 |
+|:---:|------|------|
+| **1** | 전혀 힘들지 않음 | 누워서 스트레칭 |
+| **2** | 가볍게 늘어나는 느낌 | 요가, 폼롤러 |
+| **3** | 약간의 자극 | 가벼운 산책 |
+| **4** | 조금 힘듦 | 빠른 걷기 |
+| **5** | 확실히 힘듦 | 가벼운 조깅 |
+> 회복일은 **RPE 1~3**을 유지하는 것이 목적이에요.
+            """)
+
         r_met      = 2.5
         r_met_min  = int(r_met * r_duration)
         r_load     = r_duration * r_rpe
@@ -1021,6 +1216,7 @@ def show_workout_log():
             st.session_state["baseline_met"] = int(baseline * adj)
             st.session_state["session_logs"].append({
                 "day":      day,
+                "date":     date.today().isoformat(),
                 "load":     total_load,
                 "met_min":  total_met_min,
                 "rpe":      overall_rpe,
