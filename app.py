@@ -293,6 +293,23 @@ ml_model = load_ml_model()
 # ──────────────────────────────────────────
 #  ACWR 계산 (Foster sRPE + Gabbett)
 # ──────────────────────────────────────────
+def _safe_date(s) -> bool:
+    """날짜 문자열이 유효한지 확인."""
+    try:
+        date.fromisoformat(s)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _days_since(date_str: str) -> int:
+    """오늘 기준 며칠 전인지 반환. 잘못된 포맷이면 9999 반환."""
+    try:
+        return (date.today() - date.fromisoformat(date_str)).days
+    except (ValueError, TypeError):
+        return 9999
+
+
 def calc_acwr(logs, baseline):
     """
     ACWR 날짜 기반 계산 (Foster + Gabbett).
@@ -304,8 +321,11 @@ def calc_acwr(logs, baseline):
     def days_ago(log):
         d = log.get("date")
         if not d:
-            return 9999   # date 없으면 제외
-        return (today - date.fromisoformat(d)).days
+            return 9999
+        try:
+            return (today - date.fromisoformat(d)).days
+        except (ValueError, TypeError):
+            return 9999
 
     acute_loads   = [l.get("met_min", l.get("load", 0)) for l in logs if days_ago(l) < 7]
     chronic_loads = [l.get("met_min", l.get("load", 0)) for l in logs if days_ago(l) < 28]
@@ -408,7 +428,9 @@ def calc_streak(session_logs: list) -> int:
     if not session_logs:
         return 0
     logged_dates = sorted({
-        date.fromisoformat(l["date"]) for l in session_logs if l.get("date")
+        date.fromisoformat(l["date"])
+        for l in session_logs
+        if l.get("date") and _safe_date(l["date"])
     }, reverse=True)
     if not logged_dates:
         return 0
@@ -447,7 +469,7 @@ def append_user_history(rem: float, deep: float, hr: float):
 def already_measured_today() -> bool:
     """오늘 날짜 기준으로 수면 점수가 이미 측정됐는지 확인."""
     today = date.today().isoformat()
-    return any(s["date"] == today for s in st.session_state.get("sleep_logs", []))
+    return any(s.get("date") == today for s in st.session_state.get("sleep_logs", []))
 
 
 def save_sleep_score(score: int):
@@ -544,7 +566,10 @@ def load_user_data() -> dict:
             # 이전: date 없이 저장된 로그는 달력에 표시 안 됨
             # 변경: start_date + day 오프셋으로 날짜 역산해서 채워줌
             start = data.get("start_date", date.today().isoformat())
-            start_d = date.fromisoformat(start)
+            try:
+                start_d = date.fromisoformat(start)
+            except (ValueError, TypeError):
+                start_d = date.today()
             for log in data.get("session_logs", []):
                 if "date" not in log and "day" in log:
                     estimated = start_d + timedelta(days=log["day"])
@@ -734,14 +759,21 @@ def show_main():
 # ──────────────────────────────────────────
 def _show_today_done():
     """오늘 운동 완료 or 휴식 선택 후 표시되는 완료 화면."""
-    logs        = st.session_state["session_logs"]
-    today_str   = date.today().isoformat()
-    today_log   = next((l for l in reversed(logs) if l.get("date") == today_str), None)
-    is_rest     = today_log and today_log.get("feedback") == "rest"
+    logs      = st.session_state["session_logs"]
+    today_str = date.today().isoformat()
+    today_log = next((l for l in reversed(logs) if l.get("date") == today_str), None)
+
+    # today_log 없으면 완료 플래그만 있고 로그가 없는 엣지케이스 → 수면 체크로 복귀
+    if today_log is None:
+        st.session_state["today_completed_date"] = None
+        st.rerun()
+        return
+
+    is_rest = today_log.get("feedback") == "rest"
 
     wm_min, wm_opt = get_weekly_met_targets()
     week_met = sum(l.get("met_min", 0) for l in logs
-                   if l.get("date") and (date.today() - date.fromisoformat(l["date"])).days < 7)
+                   if l.get("date") and _days_since(l["date"]) < 7)
 
     with st.container(border=True):
         if is_rest:
@@ -759,7 +791,6 @@ def _show_today_done():
         # 이번 주 진행률 (나이/성별 보정 기준)
         st.markdown("<p style='color:#475569;font-size:13px;font-weight:600;'>📊 이번 주 운동량</p>",
                     unsafe_allow_html=True)
-        pct_min = min(week_met / wm_min, 1.0) if wm_min > 0 else 0
         pct_opt = min(week_met / wm_opt, 1.0) if wm_opt > 0 else 0
         color   = "#10b981" if week_met >= wm_opt else "#2563EB" if week_met >= wm_min else "#f59e0b"
         label   = "최적 달성! 🌟" if week_met >= wm_opt else ("최소 권장 달성 ✅" if week_met >= wm_min else "권장량 미달")
@@ -839,6 +870,7 @@ def _show_sleep_input():
                 if st.button("수동으로 입력하기"):
                     del st.session_state["watch_synced_data"]
                     st.session_state["use_watch"] = False
+                    save_user_data()   # use_watch 변경을 JSON에 즉시 저장
                     st.rerun()
             return
 
@@ -961,7 +993,15 @@ def _show_prescription():
                 unsafe_allow_html=True)
 
         if st.button("다시 측정", key="rescore"):
+            # sleep_score=None만 하면 sleep_logs에서 즉시 복원되어 처방 화면으로 되돌아가는 루프 발생
+            # → sleep_logs의 오늘 항목도 함께 제거해야 측정 화면으로 진입 가능
+            today_str = date.today().isoformat()
+            st.session_state["sleep_logs"] = [
+                s for s in st.session_state.get("sleep_logs", [])
+                if s.get("date") != today_str
+            ]
             st.session_state["sleep_score"] = None
+            save_user_data()
             st.rerun()
 
     st.write("")
@@ -1018,7 +1058,7 @@ def _show_prescription():
 
     # 주간 MET-min (나이/성별 보정 기준)
     weekly_met_est       = sum(l.get("met_min", 0) for l in logs
-                               if l.get("date") and (date.today() - date.fromisoformat(l["date"])).days < 7)
+                               if l.get("date") and _days_since(l["date"]) < 7)
     wm_min, wm_opt       = get_weekly_met_targets()
     who_progress_min     = min(weekly_met_est / wm_min, 1.0) if wm_min > 0 else 0
     who_color            = "#10b981" if weekly_met_est >= wm_opt else "#2563EB" if weekly_met_est >= wm_min else "#f59e0b"
@@ -1175,7 +1215,11 @@ def _render_calendar():
 
     # 월 탐색
     cal_month = st.session_state.get("cal_month", date.today().strftime("%Y-%m"))
-    y, m = int(cal_month[:4]), int(cal_month[5:7])
+    try:
+        y, m = int(cal_month[:4]), int(cal_month[5:7])
+    except (ValueError, IndexError):
+        y, m = date.today().year, date.today().month
+        st.session_state["cal_month"] = date.today().strftime("%Y-%m")
 
     col1, col2, col3 = st.columns([1, 3, 1])
     with col1:
@@ -1318,7 +1362,7 @@ def _show_history():
     with col3:
         with st.container(border=True):
             week_met = sum(l.get("met_min", 0) for l in session_logs
-                          if l.get("date") and (date.today() - date.fromisoformat(l["date"])).days < 7)
+                          if l.get("date") and _days_since(l["date"]) < 7)
             st.metric("⚡ 이번주 MET-min", f"{week_met}")
 
     st.write("")
@@ -1346,11 +1390,13 @@ def _show_history():
             from collections import defaultdict
             weekly = defaultdict(int)
             for l in session_logs:
-                if l.get("date"):
-                    d = date.fromisoformat(l["date"])
-                    # ISO 주 번호
-                    week_key = d.strftime("%Y-W%W")
-                    weekly[week_key] += l.get("met_min", 0)
+                if l.get("date") and _safe_date(l["date"]):
+                    try:
+                        d = date.fromisoformat(l["date"])
+                        week_key = d.strftime("%Y-W%W")
+                        weekly[week_key] += l.get("met_min", 0)
+                    except (ValueError, TypeError):
+                        pass
             if weekly:
                 week_df = pd.DataFrame(
                     list(weekly.items()), columns=["주차", "MET-min"]
@@ -1413,9 +1459,9 @@ def _show_history():
         if logs:
             # 주간 MET-min 합계 (날짜 기반)
             weekly_met  = sum(l.get("met_min", 0) for l in logs
-                              if l.get("date") and (date.today() - date.fromisoformat(l["date"])).days < 7)
+                              if l.get("date") and _days_since(l["date"]) < 7)
             weekly_load = sum(l.get("load", 0) for l in logs
-                              if l.get("date") and (date.today() - date.fromisoformat(l["date"])).days < 7)
+                              if l.get("date") and _days_since(l["date"]) < 7)
             wm_min_h, wm_opt_h = get_weekly_met_targets()
             st.markdown(
                 f"<p style='color:#2563EB;font-size:13px;font-weight:600;'>"
@@ -1425,12 +1471,14 @@ def _show_history():
             st.progress(min(weekly_met / wm_opt_h, 1.0) if wm_opt_h > 0 else 0)
             st.write("")
             for l in reversed(logs[-10:]):
-                met_str = f" &nbsp;·&nbsp; ≈ <b>{l.get('met_min','?')}</b> MET-min" if "met_min" in l else ""
-                rpe_str = f" &nbsp;·&nbsp; RPE {l['rpe']} × {l['duration']}분" if "rpe" in l else ""
+                met_str  = f" &nbsp;·&nbsp; ≈ <b>{l.get('met_min','?')}</b> MET-min" if l.get("met_min") is not None else ""
+                rpe_str  = f" &nbsp;·&nbsp; RPE {l.get('rpe','?')} × {l.get('duration','?')}분" if l.get("rpe") else ""
+                date_str_l = l.get("date", "")
+                notes_str  = " 😴 휴식일" if l.get("feedback") == "rest" else ""
                 st.markdown(
                     f"<p style='color:#64748b;font-size:13px;border-bottom:1px solid #F1F5F9;padding:6px 0;'>"
-                    f"Day {l['day']}{rpe_str} &nbsp;·&nbsp; "
-                    f"<b style='color:#2563EB;'>{l['load']}</b> RPE-min{met_str}"
+                    f"{date_str_l}{rpe_str} &nbsp;·&nbsp; "
+                    f"<b style='color:#2563EB;'>{l.get('load', 0)}</b> RPE-min{met_str}{notes_str}"
                     f"</p>", unsafe_allow_html=True)
         else:
             st.markdown("<p style='color:#94a3b8;'>운동 완료 기록을 하면 여기에 쌓여요.</p>",
@@ -1534,9 +1582,16 @@ def _show_settings():
         st.markdown("<p style='color:#94a3b8;font-size:11px;'>테스트용 버튼이에요.</p>",
                     unsafe_allow_html=True)
         if st.button("⏭ 다음날로 넘어가기",
-                     help="today_completed_date·sleep_score 초기화 — 다음날 수면 체크 화면으로 이동"):
+                     help="오늘 완료·수면 기록 초기화 — 수면 체크 화면으로 이동 (테스트용)"):
+            today_str = date.today().isoformat()
+            # 오늘 완료 플래그 초기화
             st.session_state["today_completed_date"] = None
             st.session_state["sleep_score"]          = None
+            # sleep_logs에서 오늘 항목 제거 → 자동 복원 방지
+            st.session_state["sleep_logs"] = [
+                s for s in st.session_state.get("sleep_logs", [])
+                if s.get("date") != today_str
+            ]
             save_user_data()
             st.rerun()
 
@@ -1960,8 +2015,12 @@ def show_workout_log():
                     with col_del:
                         if st.button("🗑️", key=f"del_{idx}", help="삭제"):
                             st.session_state["wl_entries"].pop(idx)
-                            if st.session_state["wl_edit_idx"] == idx:
+                            edit_idx = st.session_state["wl_edit_idx"]
+                            if edit_idx == idx:
                                 st.session_state["wl_edit_idx"] = -1
+                            elif edit_idx > idx:
+                                # 삭제된 항목보다 뒤에 있던 수정 중 항목 → 인덱스 1 감소
+                                st.session_state["wl_edit_idx"] = edit_idx - 1
                             st.rerun()
 
         st.write("")
@@ -2018,9 +2077,10 @@ def show_workout_log():
             }
             if existing is not None:
                 st.session_state["session_logs"][existing] = new_log
+                # 같은 날 재제출 → 업데이트만, total_workouts 중복 카운트 방지
             else:
                 st.session_state["session_logs"].append(new_log)
-            st.session_state["total_workouts"]       = st.session_state.get("total_workouts", 0) + 1
+                st.session_state["total_workouts"] = st.session_state.get("total_workouts", 0) + 1
             st.session_state["streak"]               = calc_streak(st.session_state["session_logs"])
             st.session_state["sleep_score"]          = None
             st.session_state["today_completed_date"] = date.today().isoformat()
