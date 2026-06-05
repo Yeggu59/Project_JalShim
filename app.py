@@ -1,7 +1,9 @@
 import streamlit as st
 import pickle
 import numpy as np
+import pandas as pd
 import os
+import glob
 
 # ──────────────────────────────────────────
 #  기본 설정
@@ -91,13 +93,122 @@ st.markdown("""
 # ──────────────────────────────────────────
 #  상수
 # ──────────────────────────────────────────
-GLOBAL_AVG_REM       = 18.0
-GLOBAL_AVG_DEEP      = 17.0
-GLOBAL_AVG_HR_RESTING = 85.0
+BASELINE_MET_ALL  = 967    # 전체 (저강도 이상, 2.5+ MET)
+BASELINE_MET_3_0  = 399    # 중강도 이상 (3.0+ MET) ← 기본 기준
+BASELINE_MET_6_0  = 320    # 고강도 이상 (6.0+ MET)
 
-BASELINE_MET_ALL  = 2390   # 전체 포함
-BASELINE_MET_1_2  = 1153   # 1.2 이하 제외
-BASELINE_MET_3_0  = 766    # 3.0 미만 제외 (기본 기준)
+# ──────────────────────────────────────────
+#  data/sleep 통계 로드 (결측치 보완 + 워치 시뮬레이션)
+# ──────────────────────────────────────────
+@st.cache_data
+def load_sleep_stats():
+    """data/sleep/ CSV 전체를 읽어 피처별 평균·표준편차 반환"""
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sleep")
+    files = glob.glob(os.path.join(base, "*.csv"))
+
+    dfs = []
+    for f in files:
+        df = pd.read_csv(f)
+        df.columns = [str(c).strip().upper() for c in df.columns]
+        dfs.append(df)
+
+    raw = pd.concat(dfs, ignore_index=True)
+
+    def time_to_hours(t):
+        if pd.isna(t): return None
+        parts = str(t).split(":")
+        return int(parts[0]) + int(parts[1]) / 60 if len(parts) >= 2 else None
+
+    raw["HOURS_DECIMAL"] = raw["HOURS OF SLEEP"].apply(time_to_hours)
+    raw["REM_PERCENT"]   = raw["REM SLEEP"].astype(str).str.replace("%", "").astype(float)
+    raw["DEEP_PERCENT"]  = raw["DEEP SLEEP"].astype(str).str.replace("%", "").astype(float)
+    hr_col = next((c for c in raw.columns if "HEART" in c or "RESTING" in c), None)
+    raw["HR_BELOW_RESTING"] = raw[hr_col].astype(str).str.replace("%", "").astype(float) if hr_col else np.nan
+    raw = raw.dropna(subset=["HOURS_DECIMAL", "REM_PERCENT", "DEEP_PERCENT", "HR_BELOW_RESTING"])
+
+    stats = {}
+    for col in ["HOURS_DECIMAL", "REM_PERCENT", "DEEP_PERCENT", "HR_BELOW_RESTING"]:
+        stats[col] = {
+            "mean": float(raw[col].mean()),
+            "std":  float(raw[col].std()),
+            "min":  float(raw[col].min()),
+            "max":  float(raw[col].max()),
+        }
+    return stats
+
+SLEEP_STATS = load_sleep_stats()
+
+def _clamp(val, col):
+    """평균 ± 2σ 범위로 클램프"""
+    s = SLEEP_STATS[col]
+    return float(np.clip(val, s["min"], s["max"]))
+
+def simulate_watch_sync():
+    """워치 동기화 시뮬레이션: data/sleep 통계 기반 정규분포 랜덤 생성"""
+    result = {}
+    for col in ["HOURS_DECIMAL", "REM_PERCENT", "DEEP_PERCENT", "HR_BELOW_RESTING"]:
+        s = SLEEP_STATS[col]
+        val = np.random.normal(s["mean"], s["std"] * 0.5)   # std 절반 → 너무 극단값 방지
+        result[col] = _clamp(val, col)
+    return result
+
+# ──────────────────────────────────────────
+#  ACWR 계산 (Foster sRPE + Gabbett)
+# ──────────────────────────────────────────
+def calc_acwr(logs: list, baseline: float, current_day: int) -> dict:
+    """
+    logs: [{"day": int, "load": float}, ...]
+    baseline: 온보딩 기준 만성부하 (초기값)
+    current_day: 오늘 streak 번호
+
+    반환:
+      acute  : 최근 7일 부하 합산
+      chronic: 최근 28일 일평균 부하
+      acwr   : acute / chronic
+      zone   : "부족" / "최적" / "주의" / "위험"
+      target_multiplier: 다음 처방 배수
+    """
+    # 최근 7일 / 28일 로그 필터
+    acute_logs   = [l["load"] for l in logs if current_day - l["day"] < 7]
+    chronic_logs = [l["load"] for l in logs if current_day - l["day"] < 28]
+
+    acute = sum(acute_logs)
+
+    if len(chronic_logs) >= 7:
+        # 28일 평균 × 7 → 주간 chronic
+        chronic = (sum(chronic_logs) / len(chronic_logs)) * 7
+    else:
+        # 데이터 부족 → baseline을 주간 환산으로 사용
+        chronic = baseline * 7
+
+    acwr = acute / chronic if chronic > 0 else 1.0
+
+    if acwr < 0.8:
+        zone, load_mult = "부족",  1.2
+    elif acwr <= 1.3:
+        zone, load_mult = "최적",  1.0
+    elif acwr <= 1.5:
+        zone, load_mult = "주의",  0.85
+    else:
+        zone, load_mult = "위험",  0.6
+
+    return {"acute": round(acute), "chronic": round(chronic),
+            "acwr": round(acwr, 2), "zone": zone, "load_mult": load_mult}
+
+
+def calc_sleep_modifier(score: int) -> float:
+    if score >= 80: return 1.1
+    if score >= 50: return 1.0
+    return 0.8
+
+
+def impute_missing(hist):
+    """간편 입력 결측치 보완: 유저 이력 평균 → data/sleep 평균 순"""
+    return {
+        "REM_PERCENT":     float(np.mean(hist["rem"]))  if hist["rem"]  else SLEEP_STATS["REM_PERCENT"]["mean"],
+        "DEEP_PERCENT":    float(np.mean(hist["deep"])) if hist["deep"] else SLEEP_STATS["DEEP_PERCENT"]["mean"],
+        "HR_BELOW_RESTING":float(np.mean(hist["hr"]))  if hist["hr"]   else SLEEP_STATS["HR_BELOW_RESTING"]["mean"],
+    }
 
 # ──────────────────────────────────────────
 #  ML 모델 로드
@@ -123,6 +234,8 @@ defaults = {
     "streak":       0,
     "sleep_score":  None,
     "user_history": {"rem": [], "deep": [], "hr": []},
+    # 운동 부하 기록 (ACWR 계산용): [{"day": int, "load": float}, ...]
+    "session_logs": [],
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -249,11 +362,11 @@ def show_main():
             st.markdown(f"<p style='color:#666; font-size:13px;'>현재 기준: 3.0 MET 이상</p>", unsafe_allow_html=True)
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("전체 포함", f"{BASELINE_MET_ALL}")
+                st.metric("전체 (저강도↑)", f"{BASELINE_MET_ALL}")
             with col2:
-                st.metric("1.2↑ 기준", f"{BASELINE_MET_1_2}")
+                st.metric("중강도↑ (3.0+)", f"{BASELINE_MET_3_0}")
             with col3:
-                st.metric("3.0↑ 기준", f"{BASELINE_MET_3_0}")
+                st.metric("고강도↑ (6.0+)", f"{BASELINE_MET_6_0}")
 
         st.write("")
         with st.container(border=True):
@@ -281,15 +394,35 @@ def _show_sleep_input():
         st.write("")
 
         if st.session_state["use_watch"]:
+            # 워치 동기화 시뮬레이션: data/sleep 통계 기반 랜덤 생성
+            if "watch_synced_data" not in st.session_state:
+                st.session_state["watch_synced_data"] = simulate_watch_sync()
+
+            wd = st.session_state["watch_synced_data"]
             st.success("⌚ 어제 수면 데이터를 동기화했습니다.")
+            st.markdown(
+                f"<p style='color:#666; font-size:13px;'>"
+                f"수면 {wd['HOURS_DECIMAL']:.1f}h &nbsp;|&nbsp; "
+                f"REM {wd['REM_PERCENT']:.0f}% &nbsp;|&nbsp; "
+                f"깊은수면 {wd['DEEP_PERCENT']:.0f}% &nbsp;|&nbsp; "
+                f"안정심박이하 {wd['HR_BELOW_RESTING']:.0f}%"
+                f"</p>", unsafe_allow_html=True
+            )
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("동기화 데이터로 처방받기", type="primary"):
-                    import random
-                    st.session_state["sleep_score"] = random.randint(75, 95)
-                    st.rerun()
+                    if ml_model:
+                        X = pd.DataFrame([[wd["HOURS_DECIMAL"], wd["REM_PERCENT"],
+                                           wd["DEEP_PERCENT"], wd["HR_BELOW_RESTING"]]],
+                                         columns=["HOURS_DECIMAL", "REM_PERCENT",
+                                                  "DEEP_PERCENT", "HR_BELOW_RESTING"])
+                        score = int(ml_model.predict(X)[0])
+                        st.session_state["sleep_score"] = min(max(score, 0), 100)
+                        del st.session_state["watch_synced_data"]   # 다음날 새로 생성
+                        st.rerun()
             with col2:
                 if st.button("수동으로 입력하기"):
+                    del st.session_state["watch_synced_data"]
                     st.session_state["use_watch"] = False
                     st.rerun()
             return
@@ -310,14 +443,11 @@ def _show_sleep_input():
                 if ml_model is None:
                     st.error("모델 파일(sleep_model.pkl)을 찾을 수 없습니다.")
                 else:
-                    hist = st.session_state["user_history"]
-                    pred_rem  = np.mean(hist["rem"])  if hist["rem"]  else GLOBAL_AVG_REM
-                    pred_deep = np.mean(hist["deep"]) if hist["deep"] else GLOBAL_AVG_DEEP
-                    pred_hr   = np.mean(hist["hr"])   if hist["hr"]   else GLOBAL_AVG_HR_RESTING
-
-                    import pandas as pd
-                    X = pd.DataFrame([[sleep_hours, pred_rem, pred_deep, pred_hr]],
-                                     columns=["HOURS OF SLEEP_num", "REM SLEEP_num", "DEEP SLEEP_num", "HEART RATE UNDER RESTING_num"])
+                    imp = impute_missing(st.session_state["user_history"])
+                    X = pd.DataFrame([[sleep_hours, imp["REM_PERCENT"],
+                                       imp["DEEP_PERCENT"], imp["HR_BELOW_RESTING"]]],
+                                     columns=["HOURS_DECIMAL", "REM_PERCENT",
+                                              "DEEP_PERCENT", "HR_BELOW_RESTING"])
                     score = int(ml_model.predict(X)[0] * (subjective_feel / 3.0))
                     st.session_state["sleep_score"] = min(max(score, 0), 100)
                     st.rerun()
@@ -337,9 +467,8 @@ def _show_sleep_input():
                 if ml_model is None:
                     st.error("모델 파일(sleep_model.pkl)을 찾을 수 없습니다.")
                 else:
-                    import pandas as pd
                     X = pd.DataFrame([[sleep_hours, rem_percent, deep_percent, hr_below]],
-                                     columns=["HOURS OF SLEEP_num", "REM SLEEP_num", "DEEP SLEEP_num", "HEART RATE UNDER RESTING_num"])
+                                     columns=["HOURS_DECIMAL", "REM_PERCENT", "DEEP_PERCENT", "HR_BELOW_RESTING"])
                     score = int(ml_model.predict(X)[0])
                     st.session_state["user_history"]["rem"].append(rem_percent)
                     st.session_state["user_history"]["deep"].append(deep_percent)
@@ -352,36 +481,113 @@ def _show_sleep_input():
 #  운동 처방 섹션
 # ──────────────────────────────────────────
 def _show_prescription():
-    score = st.session_state["sleep_score"]
-    if score >= 80:
-        status, emoji, multiplier, msg = "좋음",   "🟢", 1.2, "컨디션이 좋아요. 오늘은 강도를 높여봐요!"
-    elif score >= 50:
-        status, emoji, multiplier, msg = "보통",   "🟡", 1.0, "평소대로 운동하면 좋아요."
-    else:
-        status, emoji, multiplier, msg = "주의",   "🔴", 0.5, "회복이 필요해요. 가볍게 움직여요."
+    score    = st.session_state["sleep_score"]
+    logs     = st.session_state["session_logs"]
+    baseline = st.session_state["baseline_met"]
+    day      = st.session_state["streak"]
+
+    # ── 수면 회복 카드 ──────────────────────
+    if score >= 80:   s_emoji, s_msg = "🟢", "회복 양호 — 강도를 높여봐요!"
+    elif score >= 50: s_emoji, s_msg = "🟡", "회복 보통 — 평소대로 운동하세요."
+    else:             s_emoji, s_msg = "🔴", "회복 부족 — 가볍게만 움직이세요."
 
     with st.container(border=True):
-        st.markdown(f"#### {emoji} 회복 점수")
-        st.metric("수면 점수 (ML 예측)", f"{score}점")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown(f"#### {s_emoji} 회복 점수")
+            st.markdown(f"<p style='color:#888; font-size:13px;'>{s_msg}</p>", unsafe_allow_html=True)
+        with col2:
+            st.metric("", f"{score}점")
         st.progress(score / 100)
-        st.markdown(f"<p style='color:#888;'>{msg}</p>", unsafe_allow_html=True)
-        if st.button("다시 측정"):
+        if st.button("다시 측정", key="rescore"):
             st.session_state["sleep_score"] = None
             st.rerun()
 
     st.write("")
-    with st.container(border=True):
-        target = int(st.session_state["baseline_met"] * multiplier)
-        st.markdown(f"#### 🎯 오늘의 운동 처방")
-        st.metric("목표 활동 부하 (MET)", f"{target}")
-        st.markdown(f"<p style='color:#555; font-size:13px;'>기준 MET {st.session_state['baseline_met']} × {multiplier}</p>", unsafe_allow_html=True)
 
+    # ── ACWR 부하 상태 카드 ─────────────────
+    acwr_info = calc_acwr(logs, baseline, day)
+    zone = acwr_info["zone"]
+    acwr_val = acwr_info["acwr"]
+
+    zone_emoji = {"부족": "📉", "최적": "✅", "주의": "⚠️", "위험": "🚨"}[zone]
+    zone_color = {"부족": "#4fc3f7", "최적": "#81c784", "주의": "#ffb74d", "위험": "#e57373"}[zone]
+
+    with st.container(border=True):
+        st.markdown(f"#### 📊 훈련 부하 상태")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("급성 부하 (7일)", f"{acwr_info['acute']}")
+        with col2:
+            st.metric("만성 부하 (28일)", f"{acwr_info['chronic']}")
+        with col3:
+            st.metric("ACWR", f"{acwr_val}")
+        st.markdown(
+            f"<div style='background:{zone_color}22; border:1px solid {zone_color}55; "
+            f"border-radius:10px; padding:8px 14px; margin-top:6px;'>"
+            f"<span style='color:{zone_color}; font-weight:700;'>{zone_emoji} {zone} 구간</span>"
+            f"<span style='color:#888; font-size:12px;'> &nbsp;|&nbsp; Sweet Spot: 0.8 ~ 1.3</span>"
+            f"</div>", unsafe_allow_html=True
+        )
+
+    st.write("")
+
+    # ── 오늘의 처방 ─────────────────────────
+    sleep_mod = calc_sleep_modifier(score)
+    load_mult = acwr_info["load_mult"] * sleep_mod
+    target    = int(baseline * load_mult)
+
+    with st.container(border=True):
+        st.markdown("#### 🎯 오늘의 운동 처방")
+        st.metric("목표 세션 부하 (RPE × 분)", f"{target}")
+        st.markdown(
+            f"<p style='color:#555; font-size:12px;'>"
+            f"기준 {baseline} × ACWR보정 {acwr_info['load_mult']} × 수면보정 {sleep_mod:.1f}"
+            f"</p>", unsafe_allow_html=True
+        )
+        st.markdown(
+            f"<p style='color:#888; font-size:12px;'>"
+            f"💡 예: RPE 7 × {target//7}분 / RPE 5 × {target//5}분 / RPE 3 × {target//3}분"
+            f"</p>", unsafe_allow_html=True
+        )
         st.write("")
-        if st.button("✅ 운동 완료!", type="primary"):
-            st.session_state["streak"] += 1
-            st.session_state["sleep_score"] = None
-            st.toast("기록 완료! 🔥", icon="🔥")
-            st.rerun()
+
+        # 운동 완료 입력 (RPE + 시간)
+        with st.expander("✅ 운동 완료 기록하기"):
+            col1, col2 = st.columns(2)
+            with col1:
+                duration = st.number_input("운동 시간 (분)", min_value=1, max_value=300, value=30, step=5)
+            with col2:
+                rpe = st.slider("운동 강도 (RPE)", 1, 10, 5,
+                                help="1=매우 쉬움 ~ 10=최대 강도 (운동 끝나고 15~30분 후 평가)")
+
+            session_load = duration * rpe
+            st.markdown(f"<p style='color:#6c63ff; font-size:13px;'>세션 부하: {duration}분 × RPE {rpe} = <b>{session_load}</b></p>",
+                        unsafe_allow_html=True)
+
+            st.write("")
+            st.markdown("<p style='color:#888; font-size:12px;'>오늘 운동이 어떠셨나요?</p>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns(3)
+            feedback = None
+            with col1:
+                if st.button("😰 너무 힘들었어"):  feedback = "hard"
+            with col2:
+                if st.button("👍 딱 적당했어"):     feedback = "ok"
+            with col3:
+                if st.button("💪 너무 쉬웠어"):     feedback = "easy"
+
+            if feedback:
+                # 피드백 → baseline 수렴 (±5%)
+                adj = {"hard": 0.95, "ok": 1.0, "easy": 1.05}[feedback]
+                st.session_state["baseline_met"] = int(baseline * adj)
+
+                # 세션 부하 기록
+                st.session_state["session_logs"].append({"day": day, "load": session_load})
+
+                st.session_state["streak"] += 1
+                st.session_state["sleep_score"] = None
+                st.toast("기록 완료! 🔥", icon="🔥")
+                st.rerun()
 
 
 # ──────────────────────────────────────────
