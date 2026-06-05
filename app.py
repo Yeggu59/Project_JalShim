@@ -595,6 +595,8 @@ if "data_loaded" not in st.session_state:
     saved = load_user_data()
     for k, v in saved.items():
         st.session_state[k] = v
+    # 앱 로드 시 streak 최신화 (오랜만에 열었을 때 stale 수치 방지)
+    st.session_state["streak"] = calc_streak(st.session_state.get("session_logs", []))
     st.session_state["data_loaded"] = True
 
 
