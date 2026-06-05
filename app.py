@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import os
 import glob
+import json
 
 # ──────────────────────────────────────────
 #  기본 설정
@@ -33,31 +34,52 @@ st.markdown("""
     .stButton > button {
         width: 100%; border-radius: 12px; font-weight: 600;
         height: 52px; font-size: 15px; border: 1.5px solid #CBD5E1;
-        background-color: #FFFFFF; color: #1e293b;
+        background-color: #FFFFFF; color: #1e293b !important;
         transition: all 0.18s;
     }
     .stButton > button:hover {
-        background-color: #EEF2FF; border-color: #2563EB; color: #2563EB;
+        background-color: #EEF2FF; border-color: #2563EB; color: #2563EB !important;
     }
 
     /* ── primary 버튼 (10% 포인트) ── */
     .stButton > button[kind="primary"] {
-        background: #2563EB; color: white; border: none;
+        background: #2563EB !important; color: #FFFFFF !important; border: none;
         box-shadow: 0 2px 8px rgba(37,99,235,0.25);
     }
-    .stButton > button[kind="primary"]:hover { background: #1d4ed8; }
+    .stButton > button[kind="primary"]:hover {
+        background: #1d4ed8 !important; color: #FFFFFF !important;
+    }
+    /* primary 버튼 내부 p, span 텍스트 강제 흰색 */
+    .stButton > button[kind="primary"] p,
+    .stButton > button[kind="primary"] span {
+        color: #FFFFFF !important;
+    }
+
+    /* ── secondary 버튼 ── */
+    .stButton > button[kind="secondary"] {
+        background: #FFF1F2 !important; color: #e11d48 !important;
+        border-color: #fda4af !important;
+    }
+    .stButton > button[kind="secondary"]:hover {
+        background: #ffe4e6 !important; color: #be123c !important;
+    }
 
     /* ── 탭 ── */
     .stTabs [data-baseweb="tab-list"] {
         background-color: #FFFFFF; border-radius: 14px;
-        padding: 4px; gap: 4px;
+        padding: 6px; gap: 8px;
         border: 1px solid #CBD5E1;
     }
     .stTabs [data-baseweb="tab"] {
         border-radius: 10px; font-weight: 600; color: #64748b;
+        padding: 8px 20px !important; font-size: 14px;
     }
     .stTabs [aria-selected="true"] {
-        background-color: #2563EB !important; color: white !important;
+        background-color: #2563EB !important; color: #FFFFFF !important;
+    }
+    .stTabs [aria-selected="true"] p,
+    .stTabs [aria-selected="true"] span {
+        color: #FFFFFF !important;
     }
 
     /* ── 입력 필드 ── */
@@ -229,10 +251,23 @@ def calc_sleep_modifier(score):
     return 0.8
 
 
+def rpe_to_met(rpe: int) -> float:
+    """
+    CR10 RPE → MET 근사 변환
+    근거: Borg CR10 기준, 중강도(RPE 5) ≈ 4.5 MET, 고강도(RPE 8) ≈ 8 MET
+    선형 근사: MET ≈ RPE × 0.9 + 1.0  (일반 성인 기준, 개인 VO2max에 따라 다름)
+    """
+    return round(rpe * 0.9 + 1.0, 1)
+
+
 # ──────────────────────────────────────────
-#  세션 상태 초기화
+#  데이터 영속성 (JSON 파일)
 # ──────────────────────────────────────────
-defaults = {
+USER_DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data.json")
+
+PERSIST_KEYS = ["step", "use_watch", "baseline_met", "streak", "user_history", "session_logs"]
+
+_DEFAULTS = {
     "step":         0,
     "use_watch":    False,
     "baseline_met": BASELINE_MET_3_0,
@@ -241,9 +276,37 @@ defaults = {
     "user_history": {"rem": [], "deep": [], "hr": []},
     "session_logs": [],
 }
-for k, v in defaults.items():
-    if k not in st.session_state:
+
+def load_user_data() -> dict:
+    """JSON 파일에서 유저 데이터 로드. 없으면 기본값 반환."""
+    if os.path.exists(USER_DATA_PATH):
+        try:
+            with open(USER_DATA_PATH, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            # 기본값 위에 저장값 덮어쓰기 (새 키 누락 방지)
+            data = dict(_DEFAULTS)
+            data.update(saved)
+            return data
+        except Exception:
+            pass
+    return dict(_DEFAULTS)
+
+
+def save_user_data():
+    """현재 session_state의 영속 키들을 JSON 파일에 저장."""
+    payload = {k: st.session_state[k] for k in PERSIST_KEYS if k in st.session_state}
+    with open(USER_DATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+# ──────────────────────────────────────────
+#  세션 상태 초기화 (JSON에서 복원)
+# ──────────────────────────────────────────
+if "data_loaded" not in st.session_state:
+    saved = load_user_data()
+    for k, v in saved.items():
         st.session_state[k] = v
+    st.session_state["data_loaded"] = True
 
 
 # ──────────────────────────────────────────
@@ -319,6 +382,7 @@ def show_onboarding():
             if st.button(label):
                 st.session_state["baseline_met"] = val
                 st.session_state["step"] = -1
+                save_user_data()
                 st.rerun()
 
 
@@ -571,12 +635,20 @@ def _show_prescription():
 
         st.write("")
 
-        # 목표 세션 부하
-        st.metric("오늘 목표 세션 부하 (RPE × 분)", f"{target}",
-                  help="RPE(운동 강도 1~10) × 운동 시간(분)으로 계산되는 운동량 지표예요.")
+        # 목표 세션 부하 — RPE 단위 + MET-min 병기
+        # 대표 RPE 5 기준으로 MET 환산 (중강도 처방 기준)
+        target_met_min = int(target * rpe_to_met(5) / 5)   # RPE5 기준 MET-min 근사
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("오늘 목표 세션 부하", f"{target} RPE-min",
+                      help="RPE(운동 강도 1~10) × 운동 시간(분)으로 계산되는 운동량 지표예요.")
+        with col2:
+            st.metric("MET-min 환산 (참고)", f"≈ {target_met_min}",
+                      help="RPE 5(중강도) 기준 MET-min 근사값이에요. 실제 운동 강도에 따라 달라집니다.")
         st.markdown(
             f"<p style='color:#94a3b8;font-size:12px;'>"
             f"기준 {baseline} × ACWR 보정 {acwr_info['load_mult']} × 수면 보정 {sleep_mod:.1f}"
+            f"&nbsp;·&nbsp; MET 환산: RPE × 0.9 + 1.0 (CR10 근사)"
             f"</p>", unsafe_allow_html=True)
 
         with st.expander("💡 세션 부하(RPE × 분)란?"):
@@ -638,9 +710,14 @@ Dr. Carl Foster(2001)가 고안한 검증된 방법으로, 심박수 측정 없�
                 rpe = st.slider("운동 강도 (RPE 1~10)", 1, 10, 5,
                                 help="운동 끝나고 15~30분 후, 전체 강도를 1~10으로 평가해주세요.")
             session_load = duration * rpe
+            met_approx   = rpe_to_met(rpe)
+            met_min_done = int(met_approx * duration)
             st.markdown(
                 f"<p style='color:#2563EB;font-size:13px;'>"
-                f"세션 부하: {duration}분 × RPE {rpe} = <b>{session_load}</b></p>",
+                f"세션 부하: {duration}분 × RPE {rpe} = <b>{session_load} RPE-min</b>"
+                f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+                f"MET 환산: {met_approx} MET × {duration}분 = <b>{met_min_done} MET-min</b>"
+                f"<span style='color:#94a3b8;font-size:11px;'> (RPE {rpe} 기준 추정)</span></p>",
                 unsafe_allow_html=True)
             st.write("")
             st.markdown("<p style='color:#64748b;font-size:12px;'>오늘 운동 어떠셨나요?</p>",
@@ -657,9 +734,16 @@ Dr. Carl Foster(2001)가 고안한 검증된 방법으로, 심박수 측정 없�
             if feedback:
                 adj = {"hard": 0.95, "ok": 1.0, "easy": 1.05}[feedback]
                 st.session_state["baseline_met"] = int(baseline * adj)
-                st.session_state["session_logs"].append({"day": day, "load": session_load})
+                st.session_state["session_logs"].append({
+                    "day":     day,
+                    "load":    session_load,     # RPE-min
+                    "met_min": met_min_done,      # MET-min 추정
+                    "rpe":     rpe,
+                    "duration": duration,
+                })
                 st.session_state["streak"]      += 1
                 st.session_state["sleep_score"]  = None
+                save_user_data()
                 msg = {"hard":"베이스라인을 살짝 낮췄어요 📉","ok":"딱 맞는 강도네요! 유지할게요 👍","easy":"베이스라인을 올렸어요 📈"}[feedback]
                 st.toast(f"{msg} 🔥", icon="🔥")
                 st.rerun()
@@ -723,10 +807,24 @@ def _show_history():
         st.markdown("**🏋️ 세션 부하 이력**")
         logs = st.session_state["session_logs"]
         if logs:
+            # 주간 MET-min 합계
+            current_day   = st.session_state["streak"]
+            weekly_met    = sum(l.get("met_min", 0) for l in logs if current_day - l["day"] < 7)
+            weekly_load   = sum(l["load"] for l in logs if current_day - l["day"] < 7)
+            st.markdown(
+                f"<p style='color:#2563EB;font-size:13px;font-weight:600;'>"
+                f"이번 주 누적: {weekly_load} RPE-min &nbsp;·&nbsp; ≈ {weekly_met} MET-min"
+                f"<span style='color:#94a3b8;font-weight:400;'> / WHO 권장 600</span></p>",
+                unsafe_allow_html=True)
+            st.progress(min(weekly_met / WHO_MET_MIN_WEEK, 1.0))
+            st.write("")
             for l in reversed(logs[-10:]):
+                met_str = f" &nbsp;·&nbsp; ≈ <b>{l.get('met_min','?')}</b> MET-min" if "met_min" in l else ""
+                rpe_str = f" &nbsp;·&nbsp; RPE {l['rpe']} × {l['duration']}분" if "rpe" in l else ""
                 st.markdown(
                     f"<p style='color:#64748b;font-size:13px;border-bottom:1px solid #F1F5F9;padding:6px 0;'>"
-                    f"Day {l['day']} &nbsp;·&nbsp; 부하 <b style='color:#2563EB;'>{l['load']}</b> RPE-min"
+                    f"Day {l['day']}{rpe_str} &nbsp;·&nbsp; "
+                    f"<b style='color:#2563EB;'>{l['load']}</b> RPE-min{met_str}"
                     f"</p>", unsafe_allow_html=True)
         else:
             st.markdown("<p style='color:#94a3b8;'>운동 완료 기록을 하면 여기에 쌓여요.</p>",
@@ -765,6 +863,10 @@ def _show_settings():
     with st.container(border=True):
         st.markdown("**초기화**")
         if st.button("⚠️ 처음부터 다시 시작", type="secondary"):
+            # JSON 파일 삭제
+            if os.path.exists(USER_DATA_PATH):
+                os.remove(USER_DATA_PATH)
+            # 세션 상태 전체 초기화
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
