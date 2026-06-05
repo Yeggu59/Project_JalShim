@@ -687,16 +687,6 @@ def show_onboarding():
 #  메인 앱
 # ──────────────────────────────────────────
 def show_main():
-    # ── 디버그 버튼 (사이드바 구석) ──
-    with st.sidebar:
-        st.markdown("<p style='color:#cbd5e1;font-size:10px;margin-bottom:4px;'>🛠 debug</p>",
-                    unsafe_allow_html=True)
-        if st.button("⏭ 다음날로", help="today_completed_date·sleep_score 초기화 (테스트용)"):
-            st.session_state["today_completed_date"] = None
-            st.session_state["sleep_score"]          = None
-            save_user_data()
-            st.rerun()
-
     col1, col2 = st.columns([4, 1])
     with col1:
         st.markdown("<h2 style='margin-bottom:0;'>🌙 잘쉼</h2>", unsafe_allow_html=True)
@@ -1540,12 +1530,22 @@ def _show_settings():
 
     st.write("")
     with st.container(border=True):
+        st.markdown("**🛠 개발자 도구**")
+        st.markdown("<p style='color:#94a3b8;font-size:11px;'>테스트용 버튼이에요.</p>",
+                    unsafe_allow_html=True)
+        if st.button("⏭ 다음날로 넘어가기",
+                     help="today_completed_date·sleep_score 초기화 — 다음날 수면 체크 화면으로 이동"):
+            st.session_state["today_completed_date"] = None
+            st.session_state["sleep_score"]          = None
+            save_user_data()
+            st.rerun()
+
+    st.write("")
+    with st.container(border=True):
         st.markdown("**초기화**")
         if st.button("⚠️ 처음부터 다시 시작", type="secondary"):
-            # JSON 파일 삭제
             if os.path.exists(USER_DATA_PATH):
                 os.remove(USER_DATA_PATH)
-            # 세션 상태 전체 초기화
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
