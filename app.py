@@ -2,16 +2,14 @@ import streamlit as st
 import random
 
 # --- [앱 기본 설정] ---
-# 레이아웃을 centered로 유지하여 모바일 앱 같은 비율을 줍니다.
 st.set_page_config(page_title="PACE MAKER", page_icon="🏃", layout="centered")
 
-# --- [커스텀 CSS (모던 UI의 핵심)] ---
-# 거슬리는 기본 메뉴바와 푸터를 숨기고, 폰트와 간격을 깔끔하게 조정합니다.
+# --- [커스텀 CSS (사이드바 버튼 복구)] ---
+# header 숨김 처리를 제거하여 좌측 상단 사이드바 열기(>) 버튼이 정상 작동하도록 수정했습니다.
 st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
-        header {visibility: hidden;}
         .stButton>button {
             width: 100%;
             border-radius: 8px;
@@ -40,7 +38,7 @@ if 'use_watch' not in st.session_state:
     st.session_state['use_watch'] = False
 
 # ==========================================
-# 🚀 화면 1: 온보딩 (카드형 모던 UI)
+# 🚀 화면 1: 온보딩
 # ==========================================
 def show_onboarding():
     st.title("🏃 PACE MAKER")
@@ -106,7 +104,6 @@ def show_main_dashboard():
     with col1:
         st.title(f"Day {st.session_state['streak']}")
     with col2:
-        # 워치 사용 여부에 따른 아이콘 표시
         if st.session_state['use_watch']:
             st.markdown("<h1 style='text-align: right; color: #4CAF50;'>⌚</h1>", unsafe_allow_html=True)
         else:
@@ -124,7 +121,8 @@ def show_main_dashboard():
             
             col1, col2 = st.columns(2)
             with col1:
-                sleep_hours = st.number_input("어젯밤 수면 시간", min_value=0.0, max_value=24.0, value=7.0, step=0.5, format="%.1f hr")
+                # [버그 수정됨] format에 문자를 빼고 '%.1f'만 남겼습니다. 단위는 라벨로 이동했습니다.
+                sleep_hours = st.number_input("어젯밤 수면 (시간)", min_value=0.0, max_value=24.0, value=7.0, step=0.5, format="%.1f")
             with col2:
                 subjective_feel = st.slider("기상 직후 개운함", 1, 5, 3, help="1: 최악, 5: 상쾌함")
             
@@ -135,19 +133,15 @@ def show_main_dashboard():
                 st.session_state['sleep_score'] = final_score
                 st.rerun()
     else:
-        # 분석 완료 시 보여지는 UI 카드
         score = st.session_state['sleep_score']
         
         if score >= 80:
-            status_color = "#E8F5E9" # 연한 초록
             status_emoji = "🟢"
             multiplier = 1.2
         elif score >= 50:
-            status_color = "#FFF8E1" # 연한 노랑
             status_emoji = "🟡"
             multiplier = 0.8
         else:
-            status_color = "#FFEBEE" # 연한 빨강
             status_emoji = "🔴"
             multiplier = 0.4
             
@@ -155,20 +149,18 @@ def show_main_dashboard():
             st.markdown(f"#### {status_emoji} 오늘의 회복 점수: {score}점")
             st.progress(score / 100)
             
-            # 버튼을 깔끔하게 우측 정렬 느낌으로 배치
             col1, col2, col3 = st.columns([1, 1, 1.5])
             with col3:
                 if st.button("다시 입력", use_container_width=True):
                     st.session_state['sleep_score'] = None
                     st.rerun()
 
-        # --- [섹션 2: 맞춤 운동 처방 카드 (메인 액션)] ---
+        # --- [섹션 2: 맞춤 운동 처방 카드] ---
         st.write("")
         with st.container(border=True):
             st.subheader("🎯 오늘의 운동 미션")
             target_load = int(st.session_state['baseline_met'] * multiplier)
             
-            # 눈에 띄는 메트릭 디자인
             st.metric(label="목표 활동 부하량", value=f"{target_load} MET")
             
             st.divider()
@@ -187,7 +179,6 @@ def show_main_dashboard():
                 if st.button("수고하셨습니다! 미션 완료 👏", type="primary"):
                     st.session_state['streak'] += 1
                     st.session_state['sleep_score'] = None 
-                    # balloons 대신 요즘 앱스러운 toast 알림 사용
                     st.toast('운동 기록 완료! 내일도 화이팅입니다.', icon='🔥')
                     st.rerun()
 
