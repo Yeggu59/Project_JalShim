@@ -687,6 +687,16 @@ def show_onboarding():
 #  메인 앱
 # ──────────────────────────────────────────
 def show_main():
+    # ── 디버그 버튼 (사이드바 구석) ──
+    with st.sidebar:
+        st.markdown("<p style='color:#cbd5e1;font-size:10px;margin-bottom:4px;'>🛠 debug</p>",
+                    unsafe_allow_html=True)
+        if st.button("⏭ 다음날로", help="today_completed_date·sleep_score 초기화 (테스트용)"):
+            st.session_state["today_completed_date"] = None
+            st.session_state["sleep_score"]          = None
+            save_user_data()
+            st.rerun()
+
     col1, col2 = st.columns([4, 1])
     with col1:
         st.markdown("<h2 style='margin-bottom:0;'>🌙 잘쉼</h2>", unsafe_allow_html=True)
@@ -1595,12 +1605,14 @@ def show_workout_log():
             with col1: c_duration = st.number_input("운동 시간 (분)", 1, 300, 30, 5, key="c_dur")
             with col2: c_rpe      = st.slider("강도 (RPE)", 1, 10, 5, key="c_rpe")
 
-            # MET 수동 조정
+            # MET 수동 조정 — key에 종목명 포함 → 종목 바뀌면 위젯 리셋되어 자동값 반영
+            safe_key = ex_name.replace(" ", "_").replace("/", "_")
             col_met, col_met_help = st.columns([2, 3])
             with col_met:
                 c_met_custom = st.number_input(
                     "MET 값 (직접 조정 가능)", 0.5, 20.0, float(ex_met), 0.5,
-                    key="c_met", help="종목 선택 시 자동 입력되지만, 실제 강도에 맞게 조정하세요.")
+                    key=f"c_met_{safe_key}",
+                    help="종목 선택 시 자동 입력됩니다. 실제 강도에 맞게 조정 가능해요.")
             with col_met_help:
                 st.markdown(
                     f"<p style='color:#64748b;font-size:12px;margin-top:28px;'>"
@@ -1669,16 +1681,28 @@ def show_workout_log():
             s_duration = st.number_input("총 시간 (분, 휴식 포함)", 1, 180, 45, 5, key="s_dur")
             s_rpe      = st.slider("강도 (RPE)", 1, 10, 6, key="s_rpe")
 
-            # MET 수동 조정 (근력)
+            # 종목별 기본 MET (ACSM 2024)
+            _STR_MET = {
+                "🏋️ 웨이트 (머신)":             5.0,
+                "🏋️ 웨이트 (프리웨이트)":        5.5,
+                "💪 맨몸 운동 (푸시업·스쿼트 등)": 3.8,
+                "🤸 케틀벨":                     8.0,
+            }
+            s_met_default = _STR_MET.get(s_selected, 5.0)
+            s_safe_key    = s_name.replace(" ", "_").replace("/", "_")
+
+            # MET 수동 조정 — key에 종목명 포함 → 종목 바뀌면 자동값으로 리셋
             col_met2, col_met2h = st.columns([2, 3])
             with col_met2:
                 s_met_custom = st.number_input(
-                    "MET 값 (직접 조정)", 0.5, 20.0, 5.0, 0.5, key="s_met",
-                    help="웨이트 기본값 5.0 (ACSM 2024). 종목·강도에 따라 조정하세요.")
+                    "MET 값 (직접 조정)", 0.5, 20.0, float(s_met_default), 0.5,
+                    key=f"s_met_{s_safe_key}",
+                    help="종목 선택 시 자동 입력됩니다. 조정 가능해요.")
             with col_met2h:
                 st.markdown(
-                    "<p style='color:#64748b;font-size:12px;margin-top:28px;'>"
-                    "웨이트 <b>5.0</b> · 맨몸운동 <b>3.5~5.0</b> · 케틀벨 <b>6.0~9.0</b></p>",
+                    f"<p style='color:#64748b;font-size:12px;margin-top:28px;'>"
+                    f"자동값: <b style='color:#2563EB;'>{s_met_default}</b> "
+                    f"(ACSM 2024)</p>",
                     unsafe_allow_html=True)
 
             with st.expander("📋 근력 RPE(RIR) · MET 참고표"):
@@ -1744,16 +1768,28 @@ def show_workout_log():
 > 회복일은 **RPE 1~3** 유지가 목적이에요.
                 """)
 
-            # MET 수동 조정 (회복)
+            # 종목별 기본 MET (ACSM 2024)
+            _REC_MET = {
+                "🧘 요가":     2.5,
+                "🤸 스트레칭": 2.3,
+                "🛁 냉온욕":   2.0,
+                "🚶 가벼운 산책": 3.0,
+            }
+            r_met_default = _REC_MET.get(r_selected, 2.5)
+            r_safe_key    = r_name.replace(" ", "_").replace("/", "_")
+
+            # MET 수동 조정 — key에 종목명 포함 → 종목 바뀌면 자동값으로 리셋
             col_rmet, col_rmeth = st.columns([2, 3])
             with col_rmet:
                 r_met_custom = st.number_input(
-                    "MET 값 (직접 조정)", 0.5, 10.0, 2.5, 0.5, key="r_met",
-                    help="요가 기본값 2.5 (ACSM 2024)")
+                    "MET 값 (직접 조정)", 0.5, 10.0, float(r_met_default), 0.5,
+                    key=f"r_met_{r_safe_key}",
+                    help="종목 선택 시 자동 입력됩니다. 조정 가능해요.")
             with col_rmeth:
                 st.markdown(
-                    "<p style='color:#64748b;font-size:12px;margin-top:28px;'>"
-                    "요가/스트레칭 <b>2.5</b> · 가벼운 산책 <b>3.0</b> · 냉온욕 <b>2.0</b></p>",
+                    f"<p style='color:#64748b;font-size:12px;margin-top:28px;'>"
+                    f"자동값: <b style='color:#2563EB;'>{r_met_default}</b> "
+                    f"(ACSM 2024)</p>",
                     unsafe_allow_html=True)
 
             r_load    = r_duration * r_rpe
