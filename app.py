@@ -239,6 +239,11 @@ def simulate_watch_sync():
         s   = SLEEP_STATS[col]
         val = np.random.normal(s["mean"], s["std"] * 0.5)
         result[col] = float(np.clip(val, s["min"], s["max"]))
+    # 취침 시각 시뮬레이션 (워치가 자동 감지하는 값) — 22시~새벽 2시 분포
+    result["BEDTIME_HOUR"] = int(np.random.choice(
+        [22, 23, 0, 1, 2], p=[0.25, 0.30, 0.25, 0.13, 0.07]))
+    # 안정시 심박수 시뮬레이션 (운동 MET 산출용)
+    result["REST_HR"] = int(np.clip(np.random.normal(62, 6), 48, 85))
     return result
 
 
@@ -520,6 +525,92 @@ def rpe_to_met(rpe: int) -> float:
     선형 근사: MET ≈ RPE × 0.9 + 1.0  (일반 성인 기준, 개인 VO2max에 따라 다름)
     """
     return round(rpe * 0.9 + 1.0, 1)
+
+
+# ──────────────────────────────────────────
+#  [기능 1] 취침 시각(일주기 리듬) 보정
+#  근거:
+#   - 일주기 리듬 어긋남(circadian misalignment)이 클수록 같은 수면시간이어도
+#     주관적 수면의 질과 회복(자율신경·심박변이)이 저하됨
+#     (Adverse Impact of Sleep Restriction and Circadian Misalignment on
+#      Autonomic Function, Hypertension/AHA; Nature Sci Reports 2018)
+#   - 멜라토닌 최대 분비는 새벽 3~4시 → 그 이전에 잠들수록 깊은수면이 멜라토닌
+#     고조기와 겹쳐 회복 효율이 높음 (Psychiatric Times, 멜라토닌 분비 리듬)
+#  구현: 권장 취침 구간(밤 10시~자정)을 기준 1.0배,
+#        늦어질수록 단계적으로 회복 효율 배수를 낮춤. 새벽 시간대에 가장 큰 페널티.
+# ──────────────────────────────────────────
+def bedtime_recovery_factor(bedtime_hour: int) -> float:
+    """
+    취침 시각(0~23시) → 수면 회복 효율 배수(0.80~1.00).
+    같은 수면시간이라도 늦게 잘수록 회복 점수를 낮춤.
+    """
+    # 새벽 시간대를 먼저 판정 (0~5시는 0~21 범위와 겹치므로 순서 중요)
+    if bedtime_hour == 0:            # 자정
+        return 0.95
+    if bedtime_hour == 1:
+        return 0.90
+    if bedtime_hour == 2:
+        return 0.86
+    if 3 <= bedtime_hour <= 5:       # 멜라토닌 고조기 이후, 가장 비효율
+        return 0.80
+    if 6 <= bedtime_hour <= 17:      # 낮 시간대 취침(교대근무 등)
+        return 0.83
+    if 18 <= bedtime_hour <= 21:     # 다소 이른 취침
+        return 0.97
+    # 22~23시: 권장 구간
+    return 1.00
+
+
+def bedtime_label(factor: float) -> str:
+    """취침 보정 배수 → 사용자용 설명 문구."""
+    if factor >= 1.00:
+        return "권장 취침 시간대예요 👍"
+    if factor >= 0.95:
+        return "조금 늦은 편이에요"
+    if factor >= 0.86:
+        return "늦은 취침 — 같은 시간 자도 회복이 떨어져요 ⚠️"
+    return "매우 늦은 취침 — 회복 효율이 크게 낮아요 🚨"
+
+
+# ──────────────────────────────────────────
+#  [기능 2] 심박수 기반 MET 자동 산출
+#  근거:
+#   - %HRR(심박수 예비율) ≈ %VO₂R(산소섭취 예비율)
+#     (ACSM이 1998년 운동강도 가이드라인을 이 관계로 개정;
+#      Relationship between %HRR and %VO2 reserve, treadmill exercise)
+#   - VO₂max ≈ (HRmax / HRrest) × 15.3 mL/kg/min
+#     (Uth N, Sørensen H, Overgaard K, Pedersen PK. Eur J Appl Physiol 2004)
+#   - HRmax ≈ 220 − 나이 (전통적 추정식)
+#   - 1 MET = 3.5 mL/kg/min (안정시 산소소비량 정의)
+#  산출 흐름:
+#   VO2max 추정 → VO2rest(=3.5) → %HRR로 운동 중 VO2 추정 → MET = VO2/3.5
+# ──────────────────────────────────────────
+def hr_to_met(avg_hr: float, rest_hr: float, age: int) -> float:
+    """
+    운동 중 평균 심박수 → MET 추정.
+      avg_hr  : 운동 중 평균 심박수 (bpm)
+      rest_hr : 안정시 심박수 (bpm)
+      age     : 나이 (HRmax 추정용)
+    """
+    hr_max = 220 - age                         # HRmax ≈ 220 − 나이
+    if hr_max <= rest_hr:                       # 비정상 입력 방어
+        return 1.0
+    # %HRR = (운동심박 − 안정심박) / (최대심박 − 안정심박)
+    pct_hrr = (avg_hr - rest_hr) / (hr_max - rest_hr)
+    pct_hrr = float(np.clip(pct_hrr, 0.0, 1.0))
+
+    vo2_max  = (hr_max / rest_hr) * 15.3        # Uth et al. (2004)
+    vo2_rest = 3.5                              # 1 MET
+    # %HRR ≈ %VO2R → 운동 중 VO2 = VO2rest + %HRR × (VO2max − VO2rest)
+    vo2 = vo2_rest + pct_hrr * (vo2_max - vo2_rest)
+    met = vo2 / 3.5
+    return round(max(met, 1.0), 1)
+
+
+# 나이대 → HRmax/VO2max 계산용 대표 나이
+AGE_GROUP_TO_AGE = {
+    "20대": 25, "30대": 35, "40대": 45, "50대": 55, "60대↑": 65,
+}
 
 
 # ──────────────────────────────────────────
@@ -832,19 +923,28 @@ def _show_sleep_input():
                 st.session_state["watch_synced_date"] = today_str
 
             wd = st.session_state["watch_synced_data"]
+            bt_hour = wd.get("BEDTIME_HOUR", 23)
+            bt_fac  = bedtime_recovery_factor(bt_hour)
             st.success("⌚ 어제 수면 데이터를 동기화했습니다.")
             st.markdown(
                 f"<p style='color:#64748b;font-size:13px;'>"
+                f"취침 {bt_hour:02d}시 &nbsp;·&nbsp; "
                 f"수면 {wd['HOURS_DECIMAL']:.1f}h &nbsp;·&nbsp; "
                 f"REM {wd['REM_PERCENT']:.0f}% &nbsp;·&nbsp; "
                 f"깊은수면 {wd['DEEP_PERCENT']:.0f}% &nbsp;·&nbsp; "
                 f"안정심박이하 {wd['HR_BELOW_RESTING']:.0f}%"
                 f"</p>", unsafe_allow_html=True)
+            if bt_fac < 1.0:
+                st.markdown(
+                    f"<p style='color:#f59e0b;font-size:12px;'>"
+                    f"🌙 {bedtime_label(bt_fac)} (회복 보정 ×{bt_fac})</p>",
+                    unsafe_allow_html=True)
 
             with st.expander("📖 이 수치들이 뭔가요?"):
                 st.markdown("""
 | 항목 | 의미 | 건강 기준 |
 |------|------|-----------|
+| **취침 시각** | 늦게 잘수록 같은 시간 자도 회복↓ (일주기 리듬) | 밤 10~12시 권장 |
 | **REM 수면** | 꿈꾸는 단계, 기억 정리·감정 회복 | 총 수면의 **20~25%** |
 | **깊은 수면** | 몸이 가장 깊이 쉬는 단계, 근육 회복 | 총 수면의 **15~20%** |
 | **안정심박이하 비율** | 수면 중 심박수가 안정시보다 낮은 시간 비율, 심혈관 회복 지표 | **높을수록** 회복 양호 |
@@ -858,6 +958,8 @@ def _show_sleep_input():
                                            wd["DEEP_PERCENT"],  wd["HR_BELOW_RESTING"]]],
                                          columns=["HOURS_DECIMAL","REM_PERCENT","DEEP_PERCENT","HR_BELOW_RESTING"])
                         score = int(ml_model.predict(X)[0])
+                        # [기능 1] 취침 시각 보정 적용
+                        score = int(score * bt_fac)
                         final = apply_age_offset(min(max(score, 0), 100))
                         st.session_state["sleep_score"] = final
                         save_sleep_score(final)
@@ -883,15 +985,23 @@ def _show_sleep_input():
 
         if "간편" in input_mode:
             _info_box("간편 입력이란?",
-                      "수면 시간과 개운한 정도만 입력하면 나머지는 내 이전 데이터(없으면 통계 평균)로 자동 채워집니다.")
+                      "수면 시간·취침 시각·개운함만 입력하면 나머지는 내 이전 데이터(없으면 통계 평균)로 자동 채워집니다.")
             st.write("")
             col1, col2 = st.columns(2)
             with col1:
                 sleep_hours = st.number_input("수면 시간 (시간)", 0.0, 24.0, 7.0, 0.5, format="%.1f")
+                bedtime_h   = st.number_input("취침 시각 (시, 0~23)", 0, 23, 23, 1,
+                                              help="잠든 시각. 늦을수록 같은 시간 자도 회복이 떨어져요.")
             with col2:
                 subjective_feel = st.slider("기상 직후 개운함", 1, 5, 3,
                                             help="1=최악(개운하지 않음) ~ 5=상쾌함")
             st.caption("💡 개운함 척도: 1 😴 2 😪 3 😐 4 😊 5 😄")
+            bt_fac = bedtime_recovery_factor(bedtime_h)
+            if bt_fac < 1.0:
+                st.markdown(
+                    f"<p style='color:#f59e0b;font-size:12px;'>"
+                    f"🌙 {bedtime_label(bt_fac)} (회복 보정 ×{bt_fac})</p>",
+                    unsafe_allow_html=True)
             st.write("")
             if st.button("분석하기", type="primary"):
                 if ml_model is None:
@@ -901,10 +1011,11 @@ def _show_sleep_input():
                     X   = pd.DataFrame([[sleep_hours, imp["REM_PERCENT"],
                                          imp["DEEP_PERCENT"], imp["HR_BELOW_RESTING"]]],
                                        columns=["HOURS_DECIMAL","REM_PERCENT","DEEP_PERCENT","HR_BELOW_RESTING"])
-                    # [FIX 6] 이전: score * (feel/3.0) → feel=1이면 점수 1/3 토막 (85→28)
-                    # 변경: ±10점 가산 방식으로 교체 (feel 1→-10, 3→0, 5→+10, 범위 제한)
+                    # [FIX 6] ±10점 가산 방식 (feel 1→-10, 3→0, 5→+10)
                     raw   = ml_model.predict(X)[0]
-                    score = int(raw + (subjective_feel - 3) * 5)
+                    score = raw + (subjective_feel - 3) * 5
+                    # [기능 1] 취침 시각 보정 적용
+                    score = int(score * bt_fac)
                     final = apply_age_offset(min(max(score, 0), 100))
                     st.session_state["sleep_score"] = final
                     save_sleep_score(final)
@@ -921,11 +1032,19 @@ def _show_sleep_input():
                 sleep_hours  = st.number_input("수면 시간 (시간)", 0.0, 24.0, 7.0, 0.5, format="%.1f")
                 rem_percent  = st.number_input("REM 수면 비율 (%)", 0.0, 100.0, 18.0, 1.0,
                                                help="꿈꾸는 단계. 건강 기준: 20~25%")
+                bedtime_h2   = st.number_input("취침 시각 (시, 0~23)", 0, 23, 23, 1,
+                                               help="잠든 시각. 늦을수록 같은 시간 자도 회복이 떨어져요.")
             with col2:
                 deep_percent = st.number_input("깊은 수면 비율 (%)", 0.0, 100.0, 17.0, 1.0,
                                                help="몸이 가장 깊이 쉬는 단계. 건강 기준: 15~20%")
                 hr_below     = st.number_input("안정심박이하 비율 (%)", 0.0, 100.0, 77.0, 1.0,
                                                help="수면 중 심박수가 낮을수록 심혈관 회복이 잘 된 것")
+            bt_fac2 = bedtime_recovery_factor(bedtime_h2)
+            if bt_fac2 < 1.0:
+                st.markdown(
+                    f"<p style='color:#f59e0b;font-size:12px;'>"
+                    f"🌙 {bedtime_label(bt_fac2)} (회복 보정 ×{bt_fac2})</p>",
+                    unsafe_allow_html=True)
             st.write("")
             if st.button("분석하기", type="primary"):
                 if ml_model is None:
@@ -933,7 +1052,9 @@ def _show_sleep_input():
                 else:
                     X = pd.DataFrame([[sleep_hours, rem_percent, deep_percent, hr_below]],
                                      columns=["HOURS_DECIMAL","REM_PERCENT","DEEP_PERCENT","HR_BELOW_RESTING"])
-                    score = int(ml_model.predict(X)[0])
+                    score = ml_model.predict(X)[0]
+                    # [기능 1] 취침 시각 보정 적용
+                    score = int(score * bt_fac2)
                     append_user_history(rem_percent, deep_percent, hr_below)
                     final = apply_age_offset(min(max(score, 0), 100))
                     st.session_state["sleep_score"] = final
@@ -1566,6 +1687,19 @@ def _show_settings():
 - 실제 변환값은 개인 VO₂max에 따라 차이가 있으므로 **참고값**으로만 활용
 - **Ciolac EG et al. (2011).** *Perceived exertion correlates with metabolic and cardiovascular responses in heart failure.* Clinics, 66(9), 1515–1521.
 
+#### 🌙 취침 시각(일주기 리듬) 보정
+- 일주기 리듬 어긋남(circadian misalignment)이 클수록 같은 수면시간이어도 주관적 수면의 질·자율신경 회복이 저하됨
+  - *Adverse Impact of Sleep Restriction and Circadian Misalignment on Autonomic Function in Healthy Young Adults.* Hypertension (AHA).
+  - *Daily circadian misalignment impairs human cognitive performance.* Scientific Reports (2018).
+- 멜라토닌 최대 분비는 새벽 3~4시 → 그 이전 취침이 회복에 유리 (Psychiatric Times, 멜라토닌 분비 리듬)
+
+#### ❤️ 심박수 기반 MET 자동 산출
+- %HRR(심박 예비율) ≈ %VO₂R(산소 예비율) → ACSM이 1998년 운동강도 가이드라인을 이 관계로 개정
+  - *Relationship between % heart rate reserve and % VO₂ reserve in treadmill exercise.*
+- VO₂max ≈ (HRmax / HRrest) × 15.3 mL/kg/min
+  - *Uth N, Sørensen H, Overgaard K, Pedersen PK (2004), Eur J Appl Physiol.*
+- HRmax ≈ 220 − 나이, 1 MET = 3.5 mL/kg/min
+
 #### 📦 데이터셋
 - **Fitbit MTurk 데이터셋** (공개 데이터, Kaggle): Furberg R et al. — 33명 유저, 2016년 3–5월 분단위 활동·수면 기록
   - `minuteMETsNarrow_merged.csv`, `dailyActivity_merged.csv`, `sleepDay_merged.csv` 활용
@@ -1662,19 +1796,43 @@ def show_workout_log():
             with col1: c_duration = st.number_input("운동 시간 (분)", 1, 300, 30, 5, key="c_dur")
             with col2: c_rpe      = st.slider("강도 (RPE)", 1, 10, 5, key="c_rpe")
 
-            # MET 수동 조정 — key에 종목명 포함 → 종목 바뀌면 위젯 리셋되어 자동값 반영
+            # [기능 2] MET 산출 방식 선택: 종목 기준 / 심박수 자동
+            met_mode = st.radio(
+                "MET 산출 방식",
+                ["📋 종목 기준", "❤️ 심박수로 자동 산출 (워치)"],
+                horizontal=True, key="cardio_met_mode")
+
             safe_key = ex_name.replace(" ", "_").replace("/", "_")
-            col_met, col_met_help = st.columns([2, 3])
-            with col_met:
-                c_met_custom = st.number_input(
-                    "MET 값 (직접 조정 가능)", 0.5, 20.0, float(ex_met), 0.5,
-                    key=f"c_met_{safe_key}",
-                    help="종목 선택 시 자동 입력됩니다. 실제 강도에 맞게 조정 가능해요.")
-            with col_met_help:
+
+            if "심박수" in met_mode:
+                # 심박수 → MET 자동 산출 (%HRR ≈ %VO2R + Uth VO2max 추정)
+                _age_default = AGE_GROUP_TO_AGE.get(st.session_state.get("age_group", "30대"), 35)
+                _rest_default = st.session_state.get("watch_synced_data", {}).get("REST_HR", 62)
+                hc1, hc2, hc3 = st.columns(3)
+                with hc1:
+                    avg_hr = st.number_input("운동 중 평균 심박 (bpm)", 60, 220, 130, 1, key="c_avghr")
+                with hc2:
+                    rest_hr = st.number_input("안정시 심박 (bpm)", 35, 120, int(_rest_default), 1, key="c_resthr")
+                with hc3:
+                    user_age = st.number_input("나이", 10, 100, int(_age_default), 1, key="c_age")
+                c_met_custom = hr_to_met(avg_hr, rest_hr, user_age)
                 st.markdown(
-                    f"<p style='color:#64748b;font-size:12px;margin-top:28px;'>"
-                    f"자동값: <b style='color:#2563EB;'>{ex_met}</b> "
-                    f"(ACSM 2024 기준)</p>", unsafe_allow_html=True)
+                    f"<p style='color:#2563EB;font-size:12px;'>"
+                    f"❤️ 심박 기반 산출 MET: <b>{c_met_custom}</b> "
+                    f"<span style='color:#94a3b8;'>(%HRR≈%VO₂R, Uth 2004)</span></p>",
+                    unsafe_allow_html=True)
+            else:
+                col_met, col_met_help = st.columns([2, 3])
+                with col_met:
+                    c_met_custom = st.number_input(
+                        "MET 값 (직접 조정 가능)", 0.5, 20.0, float(ex_met), 0.5,
+                        key=f"c_met_{safe_key}",
+                        help="종목 선택 시 자동 입력됩니다. 실제 강도에 맞게 조정 가능해요.")
+                with col_met_help:
+                    st.markdown(
+                        f"<p style='color:#64748b;font-size:12px;margin-top:28px;'>"
+                        f"자동값: <b style='color:#2563EB;'>{ex_met}</b> "
+                        f"(ACSM 2024 기준)</p>", unsafe_allow_html=True)
 
             with st.expander("📋 RPE 참고표 &  MET 참고값 (ACSM 2024 Compendium)"):
                 st.markdown("""
@@ -1703,6 +1861,11 @@ def show_workout_log():
 | 배드민턴 | 5.5 |
 | 축구/농구 | 7.5 |
 > 출처: Ainsworth BE et al., *2024 Adult Compendium of Physical Activities*, J Sci Med Sport 2024
+
+**심박수 자동 산출 원리:**
+- %HRR(심박 예비율) ≈ %VO₂R(산소 예비율) → ACSM 1998 가이드라인 개정 근거
+- VO₂max ≈ (HRmax / HRrest) × 15.3 (Uth et al. 2004)
+- HRmax ≈ 220 − 나이, 1 MET = 3.5 mL/kg/min
                 """)
 
             c_load    = c_duration * c_rpe
